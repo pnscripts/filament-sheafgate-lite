@@ -198,12 +198,17 @@ class ImportAction extends FilamentImportAction
     {
         $path = $this->getLocalPath($file);
 
-        return $this->readers[$path] ??= SpreadsheetReader::open(
-            $path,
-            $file->getClientOriginalName(),
-            $this->getCsvEncoding(),
-            $this->getCsvDelimiter(),
-        );
+        if (! isset($this->readers[$path])) {
+            $reader = SpreadsheetReader::open($path, $file->getClientOriginalName(), $this->getCsvEncoding(), $this->getCsvDelimiter());
+
+            // One row past maxRows() so Filament can refuse the file with its own message.
+            $maxRows = $this->getMaxRows();
+            $reader->rowLimit = $maxRows !== null ? min($maxRows + 1, SpreadsheetReader::$maxRows) : null;
+
+            $this->readers[$path] = $reader;
+        }
+
+        return $this->readers[$path];
     }
 
     public function readTable(TemporaryUploadedFile $file, ?string $sheet = null, ?int $headerRow = null): Table

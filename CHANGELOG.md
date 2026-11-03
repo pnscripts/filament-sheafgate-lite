@@ -10,7 +10,9 @@ First release.
 - Filament's column mapping, validation, queued chunks, notifications and failed-rows download work unchanged.
 - CSV encodings detected: UTF-8 (with or without BOM), UTF-16 LE/BE, Windows-1251 and Windows-1252; delimiters: comma, semicolon, tab, vertical bar.
 - Sheet choice for workbooks with several sheets; header row found below title rows; merged, blank and duplicate header cells named.
-- Spreadsheet values as people see them: dates (1900 and 1904 systems), times, booleans, formulas as their saved results, numbers without float noise, leading zeros kept.
+- Spreadsheet values read faithfully: dates (1900 and 1904 systems), times, booleans, formulas as their saved results, numbers without float noise, leading zeros in text cells kept.
 - The mapping shows an example value next to each file column.
 - Clear messages for old .xls files, damaged workbooks and empty sheets.
+- Safety limits: 50 000 data rows (or `maxRows()`) and 256 MB unpacked per workbook part, checked before and while reading.
+- Formulas without a saved result and error cells (`#DIV/0!`) refuse the file with the cell named, never import 0 or empty.
 - English and Bulgarian translations.

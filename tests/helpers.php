@@ -43,3 +43,23 @@ function livewire(string $component, array $params = []): \Livewire\Features\Sup
 {
     return \Livewire\Livewire::test($component, $params);
 }
+
+/**
+ * A ZIP archive with the given entries (name => content).
+ *
+ * @param  array<string, string>  $entries
+ */
+function zipWith(array $entries, string $suffix = '.xlsx'): string
+{
+    $path = tempnam(sys_get_temp_dir(), 'sheafgate-zip-') . $suffix;
+    $zip = new ZipArchive;
+    $zip->open($path, ZipArchive::OVERWRITE | ZipArchive::CREATE);
+
+    foreach ($entries as $name => $content) {
+        $zip->addFromString($name, $content);
+    }
+
+    $zip->close();
+
+    return $path;
+}

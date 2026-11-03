@@ -10,8 +10,13 @@ use Throwable;
  */
 class UnreadableSpreadsheet extends RuntimeException
 {
-    public static function because(string $reason, ?Throwable $previous = null): self
+    /**
+     * @param  array<string, string|int>  $replace
+     */
+    public static function because(string $reason, ?Throwable $previous = null, array $replace = []): self
     {
-        return new self(__("sheafgate-lite::import.errors.{$reason}"), 0, $previous);
+        $message = __("sheafgate-lite::import.errors.{$reason}", $replace);
+
+        return new self(is_string($message) ? $message : $reason, 0, $previous);
     }
 }

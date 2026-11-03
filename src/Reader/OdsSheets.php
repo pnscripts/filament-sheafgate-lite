@@ -213,6 +213,19 @@ final class OdsSheets
     {
         $type = $cell->getAttributeNS(self::OFFICE, 'value-type');
 
+        if ($cell->hasAttributeNS(self::TABLE, 'formula')) {
+            $shown = $this->text($cell);
+
+            // LibreOffice saves a failed formula as text such as "#DIV/0!" or "Err:502".
+            if ($type === '' || $type === 'void') {
+                return $shown === '' ? CellValue::FORMULA : CellValue::ERROR . $shown;
+            }
+
+            if ($type === 'string' && preg_match('/^(#[A-Z\/0!?]+[!?A-Z0-9]*|Err:\d+)$/', trim($shown))) {
+                return CellValue::ERROR . trim($shown);
+            }
+        }
+
         switch ($type) {
             case 'float':
             case 'percentage':

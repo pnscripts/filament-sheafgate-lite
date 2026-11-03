@@ -3,6 +3,7 @@
 namespace PNScripts\SheafgateLite\Reader;
 
 use Closure;
+use PNScripts\SheafgateLite\Exceptions\UnreadableSpreadsheet;
 use Generator;
 
 /**
@@ -22,6 +23,7 @@ final class Table
         private readonly Closure $cells,
         public readonly ?string $encoding = null,
         public readonly ?string $delimiter = null,
+        public readonly ?int $maxRows = null,
     ) {}
 
     /**
@@ -29,7 +31,7 @@ final class Table
      *
      * @return Generator<int, array<string, string>>
      */
-    public function rows(): Generator
+    public function rows(bool $limited = true): Generator
     {
         $width = count($this->headers);
 
@@ -37,11 +39,18 @@ final class Table
             return;
         }
 
+        $count = 0;
+
         foreach (($this->cells)() as $number => $cells) {
             $cells = array_slice(array_pad($cells, $width, ''), 0, $width);
 
             if (implode('', array_map('trim', $cells)) === '') {
                 continue;
+            }
+
+            // Stop while streaming: a sheet of millions of rows is never read to the end.
+            if ($limited && $this->maxRows !== null && ++$count > $this->maxRows) {
+                throw UnreadableSpreadsheet::because('too_many_rows', replace: ['max' => number_format($this->maxRows)]);
             }
 
             yield $number => array_combine($this->headers, $cells);
@@ -55,7 +64,7 @@ final class Table
     {
         $sample = [];
 
-        foreach ($this->rows() as $number => $row) {
+        foreach ($this->rows(limited: false) as $number => $row) {
             $sample[$number] = $row;
 
             if (count($sample) >= $limit) {
@@ -64,6 +73,30 @@ final class Table
         }
 
         return $sample;
+    }
+
+    /**
+     * Refuses a row with a formula without a result or an error cell: importing it would
+     * write 0 or an empty value where the spreadsheet shows something else.
+     *
+     * @param  array<string, string>  $row
+     */
+    public function assertImportable(int $number, array $row): void
+    {
+        $column = 0;
+
+        foreach ($row as $header => $value) {
+            if (CellValue::isProblem($value)) {
+                $error = CellValue::errorCode($value);
+                $replace = ['cell' => Headers::letter($column) . $number, 'column' => $header];
+
+                throw $error === null
+                    ? UnreadableSpreadsheet::because('formula_cell', replace: $replace)
+                    : UnreadableSpreadsheet::because('error_cell', replace: [...$replace, 'error' => $error]);
+            }
+
+            $column++;
+        }
     }
 
     /**
@@ -82,7 +115,8 @@ final class Table
 
         fputcsv($stream, $this->headers, ',', '"', '');
 
-        foreach ($this->rows() as $row) {
+        foreach ($this->rows() as $number => $row) {
+            $this->assertImportable($number, $row);
             fputcsv($stream, array_values($row), ',', '"', '');
         }
 

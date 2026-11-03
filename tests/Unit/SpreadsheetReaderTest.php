@@ -184,3 +184,35 @@ it('writes the clean CSV that Filament reads', function () {
 
     expect(stream_get_contents($stream))->toBe("Item,Size,\"Size (2)\",\"Unit price\"\nBox,10,20,3.5\n");
 });
+
+it('marks formulas without a saved result and error cells instead of reading 0 or nothing', function () {
+    $path = tempnam(sys_get_temp_dir(), 'sheafgate-xlsx-') . '.xlsx';
+    $writer = new XlsxWriter;
+    $writer->openToFile($path);
+    // Libraries write formulas without calculating them, as here.
+    $writer->addRow(Row::fromValues(['SKU', 'Total']));
+    $writer->addRow(Row::fromValues(['1', '=2*3']));
+    $writer->close();
+
+    $rows = iterator_to_array(SpreadsheetReader::open($path)->table()->rows());
+
+    expect($rows[2]['Total'])->toBe(\PNScripts\SheafgateLite\Reader\CellValue::FORMULA);
+});
+
+it('marks failed ODS formulas as errors', function () {
+    $path = tempnam(sys_get_temp_dir(), 'sheafgate-ods-');
+    $content = '<?xml version="1.0" encoding="UTF-8"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:spreadsheet><table:table table:name="S">'
+        . '<table:table-row><table:table-cell office:value-type="string"><text:p>A</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>B</text:p></table:table-cell></table:table-row>'
+        . '<table:table-row><table:table-cell table:formula="of:=1/0" office:value-type="string" office:string-value=""><text:p>#DIV/0!</text:p></table:table-cell><table:table-cell table:formula="of:=X()"><text:p>Err:508</text:p></table:table-cell></table:table-row>'
+        . '</table:table></office:spreadsheet></office:body></office:document-content>';
+    $zip = new ZipArchive;
+    $zip->open($path, ZipArchive::OVERWRITE);
+    $zip->addFromString('mimetype', 'application/vnd.oasis.opendocument.spreadsheet');
+    $zip->addFromString('content.xml', $content);
+    $zip->close();
+
+    expect(iterator_to_array(SpreadsheetReader::open($path)->table()->rows()))->toBe([2 => [
+        'A' => \PNScripts\SheafgateLite\Reader\CellValue::ERROR . '#DIV/0!',
+        'B' => \PNScripts\SheafgateLite\Reader\CellValue::ERROR . 'Err:508',
+    ]]);
+});

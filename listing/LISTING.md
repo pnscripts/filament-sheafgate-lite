@@ -1,6 +1,6 @@
 # Sheafgate Lite: directory listings
 
-Status 2026-11-03: built and tested (87 Pest tests, PHPStan max), buyer check from the release archive passed (see the build notes for versions). Not submitted anywhere. Planned public repository https://github.com/pnscripts/filament-sheafgate-lite with tag v1.0.0; the coordinator creates it.
+Status 2026-11-03: built and tested (94 Pest tests, PHPStan max), buyer check from the release archive passed (see the build notes for versions). Not submitted anywhere. Planned public repository https://github.com/pnscripts/filament-sheafgate-lite with tag v1.0.0; the coordinator creates it.
 
 ## Packagist (owner step: sign-in)
 
@@ -21,7 +21,7 @@ The directory is managed on filamentphp.com: sign in with GitHub at https://fila
 | Author website | https://pnscripts.com |
 | Author GitHub | pnscripts |
 | Plugin name | Sheafgate Lite |
-| Short description | Import XLSX, ODS and CSV files with Filament's own importer: column mapping, validation, queued chunks and the failed-rows download keep working, now with sheets, header rows and any CSV encoding. |
+| Short description | Messy spreadsheets into Filament 5's own importer: CSV in any encoding and delimiter, header rows below titles, merged headers, ODS, example values in the mapping, safe limits. Filament's mapping, validation and failed rows keep working. |
 | GitHub repository | pnscripts/filament-sheafgate-lite |
 | Documentation URL | https://github.com/pnscripts/filament-sheafgate-lite#readme |
 | Price | Free |
@@ -29,9 +29,13 @@ The directory is managed on filamentphp.com: sign in with GitHub at https://fila
 | Categories / tags | Action, Tables |
 | Dark mode | Yes (only Filament components; screenshot docs/images/dark.jpg) |
 | Translations | Yes (English and Bulgarian, publishable) |
-| Image (16:9, 2560x1440, light theme, plugin running) | listing/filament-directory.jpg |
+| Image (16:9, 2560x1440, light theme, plugin running) | listing/filament-directory.jpg (a Windows-1252 CSV read in Lite's modal) |
 
 Each ticked box is a public claim: dark mode and translations are verified; do not tick anything else.
+
+## Positioning
+
+Other packages also read XLSX into Filament's importer (nearest: amjadiqbal/filament-xlsx-import, Filament 4 and 5). Never describe Sheafgate Lite as the first or only one; lead with what it adds: CSV encoding and delimiter detection, header row below title rows, merged and blank headers, an ODS reader that keeps merged cells, example values in the mapping, safe limits. Filament 5 only.
 
 ## Not verified
 

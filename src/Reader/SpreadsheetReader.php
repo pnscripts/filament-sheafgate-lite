@@ -17,6 +17,22 @@ final class SpreadsheetReader
 {
     public const PREVIEW_ROWS = 30;
 
+    public const DEFAULT_MAX_ROWS = 50000;
+
+    public const DEFAULT_MAX_ENTRY_BYTES = 256 * 1024 * 1024;
+
+    /** Data rows read from one sheet before reading stops with a clear error. */
+    public static int $maxRows = self::DEFAULT_MAX_ROWS;
+
+    /** Largest unpacked size of one file inside an XLSX/ODS archive. */
+    public static int $maxEntryBytes = self::DEFAULT_MAX_ENTRY_BYTES;
+
+    /** Larger entries may not unpack to more than this many times their packed size. */
+    public const MAX_RATIO = 200;
+
+    /** The row limit of this reader (defaults to $maxRows). */
+    public ?int $rowLimit = null;
+
     private ?CsvSource $csv = null;
 
     /** @var list<string>|null */
@@ -57,6 +73,8 @@ final class SpreadsheetReader
                 throw UnreadableSpreadsheet::because('unreadable');
             }
 
+            self::assertSafeArchive($zip);
+
             $mimetype = $zip->getFromName('mimetype');
             $isXlsx = $zip->locateName('xl/workbook.xml') !== false;
             $zip->close();
@@ -79,6 +97,33 @@ final class SpreadsheetReader
         }
 
         return 'csv';
+    }
+
+    /**
+     * Refuses archives that unpack to far more than they weigh (a "zip bomb") before any
+     * entry is parsed: the sizes are read from the archive's directory.
+     */
+    private static function assertSafeArchive(ZipArchive $zip): void
+    {
+        $total = 0;
+
+        for ($index = 0; $index < $zip->numFiles; $index++) {
+            $stat = $zip->statIndex($index);
+
+            if ($stat === false) {
+                continue;
+            }
+
+            $size = (int) $stat['size'];
+            $packed = max(1, (int) $stat['comp_size']);
+            $total += $size;
+
+            if ($size > self::$maxEntryBytes || $total > self::$maxEntryBytes * 2 || ($size > 10 * 1024 * 1024 && $size / $packed > self::MAX_RATIO)) {
+                $zip->close();
+
+                throw UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) round(self::$maxEntryBytes / 1024 / 1024)]);
+            }
+        }
     }
 
     /**
@@ -197,6 +242,7 @@ final class SpreadsheetReader
             },
             encoding: $this->csv()?->encoding,
             delimiter: $this->csv()?->delimiter,
+            maxRows: $this->rowLimit ?? self::$maxRows,
         );
     }
 
@@ -252,8 +298,21 @@ final class SpreadsheetReader
                     continue;
                 }
 
+                $withoutResult = XlsxFormulas::withoutResult($this->path, (string) $sheet);
+
                 foreach ($candidate->getRowIterator() as $number => $row) {
-                    yield (is_int($number) ? $number : 0) => array_map(CellValue::toText(...), array_values($row->getCells()));
+                    $number = is_int($number) ? $number : 0;
+                    $cells = array_map(CellValue::toText(...), array_values($row->getCells()));
+
+                    if ($withoutResult !== []) {
+                        foreach ($cells as $column => $value) {
+                            if (isset($withoutResult[Headers::letter($column) . $number])) {
+                                $cells[$column] = CellValue::FORMULA;
+                            }
+                        }
+                    }
+
+                    yield $number => $cells;
                 }
 
                 break;

@@ -268,3 +268,36 @@ it('respects the action\'s authorization', function () {
 
     livewire(ListProducts::class)->assertActionHidden('import');
 });
+
+it('refuses a file whose formulas have no saved result, naming the cell', function () {
+    $path = tempnam(sys_get_temp_dir(), 'sheafgate-xlsx-') . '.xlsx';
+    $writer = new \OpenSpout\Writer\XLSX\Writer;
+    $writer->openToFile($path);
+    $writer->addRow(\OpenSpout\Common\Entity\Row::fromValues(['sku', 'name', 'price']));
+    $writer->addRow(\OpenSpout\Common\Entity\Row::fromValues(['1', 'Apron', '=2*3']));
+    $writer->close();
+
+    livewire(ListProducts::class)
+        ->mountAction('import')
+        ->setActionData(['file' => bytesUpload('calc.xlsx', (string) file_get_contents($path))])
+        ->callMountedAction()
+        ->assertNotified('The file could not be imported');
+
+    expect(Product::query()->count())->toBe(0);
+});
+
+it('stops reading at the row limit with a clear message', function () {
+    \PNScripts\SheafgateLite\Reader\SpreadsheetReader::$maxRows = 2;
+
+    try {
+        livewire(ListProducts::class)
+            ->mountAction('import')
+            ->setActionData(['file' => bytesUpload('many.csv', "sku,name\n1,A\n2,B\n3,C\n")])
+            ->callMountedAction()
+            ->assertNotified('The file could not be imported');
+    } finally {
+        \PNScripts\SheafgateLite\Reader\SpreadsheetReader::$maxRows = \PNScripts\SheafgateLite\Reader\SpreadsheetReader::DEFAULT_MAX_ROWS;
+    }
+
+    expect(Product::query()->count())->toBe(0);
+});

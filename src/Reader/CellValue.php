@@ -13,6 +13,12 @@ use OpenSpout\Common\Entity\Cell;
  */
 final class CellValue
 {
+    /** Marks a formula cell without a usable saved result (never calculated, or an error). */
+    public const FORMULA = "\u{FFFF}formula";
+
+    /** Prefix marking an error cell such as #DIV/0!; the error code follows. */
+    public const ERROR = "\u{FFFF}error:";
+
     /** Dates LibreOffice and Excel use as day zero; a value on one of them holds only a time. */
     private const TIME_ONLY_DATES = ['1899-12-30', '1899-12-31'];
 
@@ -20,8 +26,14 @@ final class CellValue
     {
         if ($value instanceof Cell\FormulaCell) {
             $value = $value->getComputedValue();
+
+            // OpenSpout gives no result for formulas that were never calculated (files written
+            // by libraries) or that end in an error: either way there is no value to import.
+            if ($value === null) {
+                return self::FORMULA;
+            }
         } elseif ($value instanceof Cell\ErrorCell) {
-            return $value->getRawValue();
+            return self::ERROR . $value->getRawValue();
         } elseif ($value instanceof Cell) {
             $value = $value->getValue();
         }
@@ -36,6 +48,22 @@ final class CellValue
             $value instanceof DateInterval => self::duration($value),
             default => '',
         };
+    }
+
+    /**
+     * Whether a text produced by toText() stands for a cell that cannot be imported.
+     */
+    public static function isProblem(string $text): bool
+    {
+        return str_starts_with($text, "\u{FFFF}");
+    }
+
+    /**
+     * The error code of an error cell (#DIV/0!), or null for a formula without a result.
+     */
+    public static function errorCode(string $text): ?string
+    {
+        return str_starts_with($text, self::ERROR) ? substr($text, strlen(self::ERROR)) : null;
     }
 
     /**

@@ -47,12 +47,15 @@ it('writes booleans as 1 and 0, which Filament\'s boolean columns accept', funct
 it('uses the saved result of a formula, not the formula', function () {
     expect(CellValue::toText(new Cell\FormulaCell('=A1*2', null, 39.8)))->toBe('39.8')
         ->and(CellValue::toText(new Cell\FormulaCell('=A1&"x"', null, 'abc')))->toBe('abc')
-        ->and(CellValue::toText(new Cell\FormulaCell('=1/0', null, null)))->toBe('');
+        ->and(CellValue::toText(new Cell\FormulaCell('=1/0', null, null)))->toBe(CellValue::FORMULA);
 });
 
 it('keeps text exactly, leading zeros included', function () {
     expect(CellValue::toText(Cell::fromValue('00123')))->toBe('00123')
         ->and(CellValue::toText(Cell::fromValue('  spaced  ')))->toBe('  spaced  ')
         ->and(CellValue::toText(null))->toBe('')
-        ->and(CellValue::toText(new Cell\ErrorCell('#DIV/0!', null)))->toBe('#DIV/0!');
+        ->and(CellValue::toText(new Cell\ErrorCell('#DIV/0!', null)))->toBe(CellValue::ERROR . '#DIV/0!')
+        ->and(CellValue::isProblem(CellValue::ERROR . '#N/A'))->toBeTrue()
+        ->and(CellValue::errorCode(CellValue::ERROR . '#N/A'))->toBe('#N/A')
+        ->and(CellValue::errorCode(CellValue::FORMULA))->toBeNull();
 });
