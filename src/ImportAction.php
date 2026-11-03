@@ -145,7 +145,12 @@ class ImportAction extends FilamentImportAction
         $choice = $this->getSpreadsheetChoice();
 
         try {
-            return $this->readTable($file, $choice['sheet'], $choice['header_row'])->toCsvStream();
+            $stream = $this->readTable($file, $choice['sheet'], $choice['header_row'])->toCsvStream();
+
+            // The import has its rows now: cached previews of the upload are not kept.
+            SpreadsheetReader::forget($this->getLocalPath($file));
+
+            return $stream;
         } catch (UnreadableSpreadsheet $exception) {
             Notification::make()
                 ->title(__('sheafgate-lite::import.errors.failed_title'))

@@ -120,6 +120,9 @@ final class SpreadsheetReader
      * Refuses archives that unpack to far more than they weigh (a "zip bomb") before any
      * entry is parsed: the sizes are read from the archive's directory.
      */
+    /** More parts than any real workbook has; checked on the archive directory first. */
+    public const MAX_ARCHIVE_ENTRIES = 5000;
+
     private static function assertSafeArchive(ZipArchive $zip, string $path): void
     {
         // An archive checked once is not unpacked again on every Livewire request.
@@ -129,16 +132,23 @@ final class SpreadsheetReader
             return;
         }
 
-        $total = 0;
         $tooLarge = fn (): UnreadableSpreadsheet => UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) round(self::$maxEntryBytes / 1024 / 1024)]);
 
-        // The sizes in the archive's directory can lie, so every part is unpacked here and the
-        // bytes it really produces are counted, stopping at the first limit it passes.
+        if ($zip->numFiles > self::MAX_ARCHIVE_ENTRIES) {
+            throw $tooLarge();
+        }
+
+        $total = 0;
+        $totalLimit = min(self::$maxEntryBytes, max(10 * 1024 * 1024, (int) filesize($path) * self::MAX_RATIO));
+
+        // The sizes in the archive's directory can lie, so every part that is read later
+        // (XML and relationship parts) is unpacked here and the bytes it really produces are
+        // counted, stopping at the first limit it passes. Images and other media are never read.
         for ($index = 0; $index < $zip->numFiles; $index++) {
             $stat = $zip->statIndex($index);
             $name = $stat === false ? false : $zip->getNameIndex($index);
 
-            if ($stat === false || $name === false || str_ends_with($name, '/')) {
+            if ($stat === false || $name === false || str_ends_with($name, '/') || ! preg_match('/(\.xml|\.rels|^mimetype)$/i', $name)) {
                 continue;
             }
 
@@ -163,7 +173,7 @@ final class SpreadsheetReader
                     $size += strlen($chunk);
                     $total += strlen($chunk);
 
-                    if ($size > $limit || $total > self::$maxEntryBytes) {
+                    if ($size > $limit || $total > $totalLimit) {
                         throw $tooLarge();
                     }
 
@@ -182,23 +192,75 @@ final class SpreadsheetReader
     }
 
     /**
-     * A file in the system temp folder tied to this upload's path, size and change time.
+     * Where checked archives, sheet lists and previews of uploads are kept: the app's
+     * storage/framework/cache/sheafgate (or the system temp folder outside Laravel).
+     */
+    public static function cacheDirectory(): string
+    {
+        $base = function_exists('storage_path') && function_exists('app') && app()->bound('path.storage')
+            ? storage_path('framework/cache/sheafgate')
+            : sys_get_temp_dir() . '/sheafgate-cache';
+
+        if (! is_dir($base)) {
+            @mkdir($base, 0700, true);
+        }
+
+        return $base;
+    }
+
+    /**
+     * Removes everything cached for one upload (its previews hold uploaded values).
+     */
+    public static function forget(string $path): void
+    {
+        foreach (glob(self::cacheDirectory() . '/' . sha1($path) . '-*') ?: [] as $file) {
+            @unlink($file);
+        }
+    }
+
+    /**
+     * Removes cached entries older than the given age (default 6 hours).
+     */
+    public static function sweep(int $seconds = 21600): int
+    {
+        $removed = 0;
+
+        foreach (glob(self::cacheDirectory() . '/*') ?: [] as $file) {
+            $changed = @filemtime($file);
+
+            if ($changed !== false && $changed <= time() - $seconds && @unlink($file)) {
+                $removed++;
+            }
+        }
+
+        return $removed;
+    }
+
+    /**
+     * A cache file tied to this upload's path, size and change time.
      */
     private static function cachePath(string $path, string $kind, string $extra = ''): ?string
     {
+        static $swept = false;
+
         $stat = @stat($path);
 
         if ($stat === false) {
             return null;
         }
 
-        $folder = sys_get_temp_dir() . '/sheafgate-cache';
+        $folder = self::cacheDirectory();
 
-        if (! is_dir($folder) && ! @mkdir($folder, 0700, true) && ! is_dir($folder)) {
+        if (! is_dir($folder)) {
             return null;
         }
 
-        return $folder . '/' . sha1($path . '|' . $stat['size'] . '|' . $stat['mtime'] . '|' . $kind . '|' . $extra);
+        if (! $swept) {
+            $swept = true;
+            self::sweep();
+        }
+
+        return $folder . '/' . sha1($path) . '-' . sha1($stat['size'] . '|' . $stat['mtime'] . '|' . $kind . '|' . $extra);
     }
 
     /**

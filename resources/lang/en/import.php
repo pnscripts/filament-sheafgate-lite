@@ -44,6 +44,7 @@ return [
         'formula_cell' => 'Cell :cell (column “:column”) holds a formula without a saved result, or one that ends in an error. Open the file in Excel or LibreOffice, fix the formula, save it and upload it again.',
         'error_cell' => 'Cell :cell (column “:column”) shows the error :error. Fix it in the spreadsheet and upload the file again.',
         'cell_too_long' => 'A cell holds more than :max characters, the most a spreadsheet cell can hold. The file looks damaged; save it again from Excel or LibreOffice.',
+        'too_large_sheet' => 'The sheet uses cells beyond the last column (XFD) or row (1,048,576) a spreadsheet can have. The file looks damaged; save it again from Excel or LibreOffice.',
         'failed_title' => 'The file could not be imported',
     ],
 

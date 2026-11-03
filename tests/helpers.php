@@ -115,3 +115,35 @@ function xlsxWithSheet(string $sheetXml, ?string $sharedStrings = null): array
 
     return $entries;
 }
+
+/**
+ * Reads a workbook in a separate PHP process with a lowered memory limit, as a typical
+ * server would, and returns [exit code, output]. A fatal out-of-memory error cannot be
+ * caught in the test process itself.
+ *
+ * @return array{0: int, 1: string}
+ */
+function readInChildProcess(string $path, string $memoryLimit = '128M'): array
+{
+    $script = tempnam(sys_get_temp_dir(), 'sheafgate-child-') . '.php';
+    $autoload = var_export(dirname(__DIR__) . '/vendor/autoload.php', true);
+    $file = var_export($path, true);
+    $namespace = class_exists(\PNScripts\Sheafgate\Reader\SpreadsheetReader::class) ? 'PNScripts\\Sheafgate' : 'PNScripts\\SheafgateLite';
+    file_put_contents($script, <<<PHP
+<?php
+require {$autoload};
+function __(\$key, \$replace = []) { return \$key; }
+try {
+    \$rows = 0;
+    foreach (\\{$namespace}\\Reader\\SpreadsheetReader::open({$file}, 'child.xlsx')->table()->rows() as \$row) { \$rows++; }
+    echo "rows=\$rows";
+} catch (\\{$namespace}\\Exceptions\\UnreadableSpreadsheet \$e) {
+    echo 'refused: ' . \$e->getMessage();
+}
+PHP);
+    $output = [];
+    exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=' . $memoryLimit . ' ' . escapeshellarg($script) . ' 2>&1', $output, $code);
+    @unlink($script);
+
+    return [$code, implode("\n", $output)];
+}

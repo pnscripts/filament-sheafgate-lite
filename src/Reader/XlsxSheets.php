@@ -28,8 +28,21 @@ final class XlsxSheets
     /** @var list<array{name: string, path: string, visible: bool}>|null */
     private ?array $sheets = null;
 
-    /** @var list<string>|null */
-    private ?array $sharedStrings = null;
+    /** The last column (XFD) and row a spreadsheet can have. */
+    public const MAX_COLUMNS = 16384;
+
+    public const MAX_ROWS = 1048576;
+
+    /** Shared strings are kept packed: all texts in one string, their start offsets in another. */
+    public const MAX_SHARED_STRINGS = 5000000;
+
+    public const MAX_SHARED_STRING_BYTES = 64 * 1024 * 1024;
+
+    private ?string $stringData = null;
+
+    private string $stringOffsets = '';
+
+    private int $stringCount = 0;
 
     /** @var array<int, string>|null style index => "date", "duration" or "" */
     private ?array $styleKinds = null;
@@ -96,7 +109,7 @@ final class XlsxSheets
     public function rows(string $sheet): \Generator
     {
         $path = $this->sheetPath($sheet);
-        $strings = $this->sharedStrings();
+        $this->loadSharedStrings();
         $kinds = $this->styleKinds();
         $xml = $this->open($path);
         $number = 0;
@@ -122,6 +135,10 @@ final class XlsxSheets
                 }
 
                 $number = (int) ($xml->getAttribute('r') ?? 0) ?: $number + 1;
+
+                if ($number > self::MAX_ROWS) {
+                    throw UnreadableSpreadsheet::because('too_large_sheet');
+                }
                 $row = $xml->expand();
                 $moved = $xml->next();
 
@@ -129,7 +146,7 @@ final class XlsxSheets
                     continue;
                 }
 
-                $cells = $this->cells($row, $strings, $kinds);
+                $cells = $this->cells($row, $kinds);
 
                 if ($cells !== []) {
                     yield $number => $cells;
@@ -181,11 +198,10 @@ final class XlsxSheets
     }
 
     /**
-     * @param  list<string>  $strings
      * @param  array<int, string>  $kinds
      * @return list<string>
      */
-    private function cells(DOMElement $row, array $strings, array $kinds): array
+    private function cells(DOMElement $row, array $kinds): array
     {
         $cells = [];
         $next = 0;
@@ -196,9 +212,14 @@ final class XlsxSheets
             }
 
             $reference = $cell->getAttribute('r');
-            $column = preg_match('/^([A-Z]+)/', $reference, $m) ? Headers::columnIndex($m[1]) : $next;
+            $column = preg_match('/^([A-Z]{1,3})(?![A-Z])/', $reference, $m) ? Headers::columnIndex($m[1]) : (preg_match('/^[A-Z]/', $reference) ? self::MAX_COLUMNS : $next);
             $next = $column + 1;
-            $value = $this->value($cell, $strings, $kinds);
+
+            if ($column >= self::MAX_COLUMNS) {
+                throw UnreadableSpreadsheet::because('too_large_sheet');
+            }
+
+            $value = $this->value($cell, $kinds);
 
             if ($value === '') {
                 continue;
@@ -217,10 +238,9 @@ final class XlsxSheets
     }
 
     /**
-     * @param  list<string>  $strings
      * @param  array<int, string>  $kinds
      */
-    private function value(DOMElement $cell, array $strings, array $kinds): string
+    private function value(DOMElement $cell, array $kinds): string
     {
         $type = $cell->getAttribute('t') ?: 'n';
         $formula = null;
@@ -254,7 +274,7 @@ final class XlsxSheets
         }
 
         return match ($type) {
-            's' => $strings[(int) $raw] ?? '',
+            's' => $this->sharedString((int) $raw),
             'str' => $raw,
             'b' => $raw === '1' || strtolower($raw) === 'true' ? '1' : '0',
             'd' => $this->isoDate($raw),
@@ -310,23 +330,43 @@ final class XlsxSheets
         return (isset($m[2]) && $m[2] !== '00:00:00') ? "{$m[1]} {$m[2]}" : $m[1];
     }
 
-    /**
-     * @return list<string>
-     */
-    private function sharedStrings(): array
+    private function sharedString(int $index): string
     {
-        if ($this->sharedStrings !== null) {
-            return $this->sharedStrings;
+        if ($this->stringData === null || $index < 0 || $index >= $this->stringCount) {
+            return '';
         }
 
+        $start = unpack('V', substr($this->stringOffsets, $index * 4, 4));
+        $end = $index + 1 < $this->stringCount ? unpack('V', substr($this->stringOffsets, ($index + 1) * 4, 4)) : [1 => strlen($this->stringData)];
+
+        if (! is_array($start) || ! is_array($end) || ! is_int($start[1]) || ! is_int($end[1])) {
+            return '';
+        }
+
+        return substr($this->stringData, $start[1], $end[1] - $start[1]);
+    }
+
+    /**
+     * Reads the shared strings into one packed string (a PHP array of millions of strings
+     * needs several times the memory), with limits on their number and size.
+     */
+    private function loadSharedStrings(): void
+    {
+        if ($this->stringData !== null) {
+            return;
+        }
+
+        $this->stringData = '';
         $path = $this->relatedPart('sharedStrings') ?? 'xl/sharedStrings.xml';
-        $strings = [];
 
         if (! $this->exists($path)) {
-            return $this->sharedStrings = [];
+            return;
         }
 
         $xml = $this->open($path);
+        $data = '';
+        $offsets = '';
+        $count = 0;
 
         try {
             $moved = $xml->read();
@@ -334,7 +374,14 @@ final class XlsxSheets
             while ($moved) {
                 if ($xml->nodeType === XMLReader::ELEMENT && $xml->localName === 'si' && $xml->namespaceURI === self::MAIN) {
                     $node = $xml->expand();
-                    $strings[] = $node instanceof DOMElement ? $this->richText($node) : '';
+                    $offsets .= pack('V', strlen($data));
+                    $data .= $node instanceof DOMElement ? $this->richText($node) : '';
+                    $count++;
+
+                    if ($count > self::MAX_SHARED_STRINGS || strlen($data) > self::MAX_SHARED_STRING_BYTES) {
+                        throw UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) (self::MAX_SHARED_STRING_BYTES / 1024 / 1024)]);
+                    }
+
                     $moved = $xml->next();
 
                     continue;
@@ -348,7 +395,9 @@ final class XlsxSheets
             $xml->close();
         }
 
-        return $this->sharedStrings = $strings;
+        $this->stringData = $data;
+        $this->stringOffsets = $offsets;
+        $this->stringCount = $count;
     }
 
     /**

@@ -69,6 +69,10 @@ final class OdsSheets
                 continue;
             }
 
+            if ($first > XlsxSheets::MAX_ROWS) {
+                throw UnreadableSpreadsheet::because('too_large_sheet');
+            }
+
             for ($i = 0; $i < min($repeat, self::MAX_REPEATED_ROWS); $i++) {
                 yield $first + $i => $cells;
             }
@@ -195,6 +199,10 @@ final class OdsSheets
                 continue;
             }
 
+            if (count($cells) + $pendingEmpty + 1 > XlsxSheets::MAX_COLUMNS) {
+                throw UnreadableSpreadsheet::because('too_large_sheet');
+            }
+
             for ($i = 0; $i < $pendingEmpty; $i++) {
                 $cells[] = '';
             }
@@ -203,6 +211,10 @@ final class OdsSheets
 
             for ($i = 0; $i < min($repeat, 1024); $i++) {
                 $cells[] = $value;
+            }
+
+            if (count($cells) > XlsxSheets::MAX_COLUMNS) {
+                throw UnreadableSpreadsheet::because('too_large_sheet');
             }
         }
 
