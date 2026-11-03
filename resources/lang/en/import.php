@@ -4,10 +4,10 @@ return [
 
     'file' => [
         'placeholder' => 'Upload an XLSX, ODS or CSV file',
+        'type' => 'Upload an XLSX, ODS or CSV file.',
         'read_csv' => 'Read as :encoding text, columns separated by :delimiter.',
         'read_sheet' => 'Sheet “:sheet”, column names in row :row.',
         'read_csv_header' => 'Column names in row :row.',
-        'rows' => '{0} No data rows below the header.|{1} 1 data row.|[2,*] :count data rows.',
     ],
 
     'sheet' => [

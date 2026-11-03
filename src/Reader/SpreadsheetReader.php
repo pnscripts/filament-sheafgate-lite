@@ -3,10 +3,6 @@
 namespace PNScripts\SheafgateLite\Reader;
 
 use League\Csv\Reader as CsvReader;
-use OpenSpout\Reader\ReaderInterface;
-use OpenSpout\Reader\SheetInterface;
-use OpenSpout\Reader\SheetWithMergeCellsInterface;
-use OpenSpout\Reader\SheetWithVisibilityInterface;
 use OpenSpout\Reader\XLSX\Options as XlsxOptions;
 use OpenSpout\Reader\XLSX\Reader as XlsxReader;
 use PNScripts\SheafgateLite\Exceptions\UnreadableSpreadsheet;
@@ -113,11 +109,11 @@ final class SpreadsheetReader
         $visible = [];
         $all = [];
 
-        $this->withReader(function (ReaderInterface $reader) use (&$visible, &$all): void {
+        $this->withReader(function (XlsxReader $reader) use (&$visible, &$all): void {
             foreach ($reader->getSheetIterator() as $sheet) {
                 $all[] = $sheet->getName();
 
-                if (! ($sheet instanceof SheetWithVisibilityInterface) || $sheet->isVisible()) {
+                if ($sheet->isVisible()) {
                     $visible[] = $sheet->getName();
                 }
             }
@@ -221,12 +217,14 @@ final class SpreadsheetReader
      */
     public function cells(?string $sheet = null): \Generator
     {
-        if ($this->format === 'csv') {
-            $reader = CsvReader::from($this->csv()->path);
-            $reader->setDelimiter($this->csv()->delimiter);
+        $csv = $this->csv();
+
+        if ($csv !== null) {
+            $reader = CsvReader::from($csv->path);
+            $reader->setDelimiter($csv->delimiter);
 
             foreach ($reader->getRecords() as $offset => $record) {
-                yield $offset + 1 => array_map(fn (mixed $value): string => (string) $value, array_values($record));
+                yield $offset + 1 => array_map(fn (mixed $value): string => is_scalar($value) ? (string) $value : '', array_values($record));
             }
 
             return;
@@ -255,7 +253,7 @@ final class SpreadsheetReader
                 }
 
                 foreach ($candidate->getRowIterator() as $number => $row) {
-                    yield (int) $number => array_map(CellValue::toText(...), array_values($row->getCells()));
+                    yield (is_int($number) ? $number : 0) => array_map(CellValue::toText(...), array_values($row->getCells()));
                 }
 
                 break;
@@ -321,10 +319,9 @@ final class SpreadsheetReader
     {
         $merges = [];
 
-        $this->withReader(function (ReaderInterface $reader) use ($sheet, $headerRow, &$merges): void {
-            /** @var SheetInterface<\OpenSpout\Reader\RowIteratorInterface> $candidate */
+        $this->withReader(function (XlsxReader $reader) use ($sheet, $headerRow, &$merges): void {
             foreach ($reader->getSheetIterator() as $candidate) {
-                if ($candidate->getName() !== $sheet || ! $candidate instanceof SheetWithMergeCellsInterface) {
+                if ($candidate->getName() !== $sheet) {
                     continue;
                 }
 
@@ -352,22 +349,20 @@ final class SpreadsheetReader
         return $this->csv ??= CsvSource::open($this->path, $this->csvEncoding, $this->csvDelimiter);
     }
 
-    private function makeReader(bool $loadMerges = false): ReaderInterface
+    private function makeReader(bool $loadMerges = false): XlsxReader
     {
         $options = new XlsxOptions;
         $options->SHOULD_FORMAT_DATES = false;
         // Empty rows are kept so the row numbers match the ones the spreadsheet shows.
         $options->SHOULD_PRESERVE_EMPTY_ROWS = true;
 
-        if ($loadMerges && property_exists($options, 'SHOULD_LOAD_MERGE_CELLS')) {
-            $options->SHOULD_LOAD_MERGE_CELLS = true;
-        }
+        $options->SHOULD_LOAD_MERGE_CELLS = $loadMerges;
 
         return new XlsxReader($options);
     }
 
     /**
-     * @param  callable(ReaderInterface): void  $callback
+     * @param  callable(XlsxReader): void  $callback
      */
     private function withReader(callable $callback, bool $loadMerges = false): void
     {

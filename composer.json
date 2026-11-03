@@ -40,7 +40,7 @@
         "php": "^8.2",
         "filament/filament": "^5.8",
         "illuminate/support": "^12.0|^13.0",
-        "openspout/openspout": "^4.23"
+        "openspout/openspout": "^4.26"
     },
     "require-dev": {
         "larastan/larastan": "^3.0",

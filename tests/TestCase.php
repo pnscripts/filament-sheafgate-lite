@@ -42,6 +42,7 @@ abstract class TestCase extends Orchestra
             'name' => 'Editor',
             'email' => 'editor@example.test',
             'password' => 'not-used',
+            'can_import' => true,
         ]);
 
         $this->actingAs($this->user);

@@ -34,6 +34,9 @@ class ImportAction extends FilamentImportAction
     /** @var list<string> */
     public const EXTENSIONS = ['xlsx', 'ods', 'csv', 'tsv', 'txt'];
 
+    /** @var list<string> accepted so the reader can explain how to convert them */
+    public const EXPLAINED_EXTENSIONS = ['xls'];
+
     /** @var list<string> */
     public const MIME_TYPES = [
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -63,6 +66,9 @@ class ImportAction extends FilamentImportAction
     /** @var array<string, Table> */
     protected array $tables = [];
 
+    /** @var array<string, string> local copies of uploads kept on cloud disks, by upload name */
+    protected static array $localCopies = [];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -87,7 +93,7 @@ class ImportAction extends FilamentImportAction
 
     public function getCsvEncoding(): ?string
     {
-        return $this->evaluate($this->csvEncoding);
+        return $this->toText($this->evaluate($this->csvEncoding));
     }
 
     /**
@@ -117,6 +123,8 @@ class ImportAction extends FilamentImportAction
     /**
      * Filament reads the converted file, which is always comma-separated. The delimiter
      * you set with csvDelimiter() applies to uploaded CSV files and the example file.
+     *
+     * @param  CsvReader<array<mixed>> | null  $reader
      */
     public function getCsvDelimiter(?CsvReader $reader = null): ?string
     {
@@ -124,7 +132,7 @@ class ImportAction extends FilamentImportAction
             return ',';
         }
 
-        return $this->evaluate($this->csvDelimiter);
+        return $this->toText($this->evaluate($this->csvDelimiter));
     }
 
     /**
@@ -155,7 +163,7 @@ class ImportAction extends FilamentImportAction
     public function getFileValidationRules(): array
     {
         $rules = [
-            'extensions:' . implode(',', static::EXTENSIONS),
+            'extensions:' . implode(',', array_merge(self::EXTENSIONS, self::EXPLAINED_EXTENSIONS)),
             fn (): Closure => function (string $attribute, mixed $value, Closure $fail): void {
                 if (! $value instanceof TemporaryUploadedFile) {
                     return;
@@ -180,7 +188,7 @@ class ImportAction extends FilamentImportAction
                 $extraRules = explode('|', $extraRules);
             }
 
-            $rules = [...$rules, ...$extraRules];
+            $rules = array_merge($rules, is_array($extraRules) ? $extraRules : [$extraRules]);
         }
 
         return $rules;
@@ -194,7 +202,7 @@ class ImportAction extends FilamentImportAction
             $path,
             $file->getClientOriginalName(),
             $this->getCsvEncoding(),
-            $this->evaluate($this->csvDelimiter),
+            $this->getCsvDelimiter(),
         );
     }
 
@@ -219,8 +227,8 @@ class ImportAction extends FilamentImportAction
         $headerRow = $choice['header_row'] ?? null;
 
         return [
-            'sheet' => filled($choice['sheet'] ?? null) ? (string) $choice['sheet'] : null,
-            'header_row' => (is_numeric($headerRow) && (int) $headerRow >= 1) ? (int) $headerRow : null,
+            'sheet' => $this->toText($choice['sheet'] ?? null),
+            'header_row' => $this->toHeaderRow($headerRow),
         ];
     }
 
@@ -265,8 +273,12 @@ class ImportAction extends FilamentImportAction
         return FileUpload::make('file')
             ->label(__('filament-actions::import.modal.form.file.label'))
             ->placeholder(__('sheafgate-lite::import.file.placeholder'))
-            ->acceptedFileTypes(static::MIME_TYPES)
+            ->acceptedFileTypes(self::MIME_TYPES)
             ->rules($this->getFileValidationRules())
+            ->validationMessages([
+                'mimetypes' => __('sheafgate-lite::import.file.type'),
+                'extensions' => __('sheafgate-lite::import.file.type'),
+            ])
             ->afterStateUpdated(function (FileUpload $component, Component $livewire, Set $set, mixed $state): void {
                 if (! $state instanceof TemporaryUploadedFile) {
                     return;
@@ -291,7 +303,7 @@ class ImportAction extends FilamentImportAction
                     return null;
                 }
 
-                return $this->describeFile($file, $get('sheafgate.sheet'), $this->toHeaderRow($get('sheafgate.header_row')));
+                return $this->describeFile($file, $get('sheafgate.sheet'), $get('sheafgate.header_row'));
             })
             ->storeFiles(false)
             ->visibility('private')
@@ -324,7 +336,7 @@ class ImportAction extends FilamentImportAction
                 $file = $get('file');
 
                 if ($file instanceof TemporaryUploadedFile) {
-                    $this->refreshTable($file, filled($state) ? (string) $state : null, null, $set);
+                    $this->refreshTable($file, $this->toText($state), null, $set);
                 }
             })
             ->visible(function (Get $get): bool {
@@ -355,7 +367,7 @@ class ImportAction extends FilamentImportAction
                 $file = $get('file');
 
                 if ($file instanceof TemporaryUploadedFile) {
-                    $this->refreshTable($file, filled($get('sheafgate.sheet')) ? (string) $get('sheafgate.sheet') : null, $this->toHeaderRow($state), $set, keepHeaderRow: true);
+                    $this->refreshTable($file, $this->toText($get('sheafgate.sheet')), $this->toHeaderRow($state), $set, keepHeaderRow: true);
                 }
             })
             ->visible(fn (Get $get): bool => $this->showsHeaderRowField() && ($get('file') instanceof TemporaryUploadedFile));
@@ -374,7 +386,7 @@ class ImportAction extends FilamentImportAction
                 }
 
                 try {
-                    $table = $this->readTable($file, filled($get('sheafgate.sheet')) ? (string) $get('sheafgate.sheet') : null, $this->toHeaderRow($get('sheafgate.header_row')));
+                    $table = $this->readTable($file, $this->toText($get('sheafgate.sheet')), $this->toHeaderRow($get('sheafgate.header_row')));
                 } catch (UnreadableSpreadsheet) {
                     return [];
                 }
@@ -435,10 +447,13 @@ class ImportAction extends FilamentImportAction
         $set('columnMap', $this->guessColumnMap($table->headers));
     }
 
-    protected function describeFile(TemporaryUploadedFile $file, mixed $sheet, ?int $headerRow): ?string
+    /**
+     * The line under the upload field: how the file was read.
+     */
+    public function describeFile(TemporaryUploadedFile $file, mixed $sheet, mixed $headerRow): ?string
     {
         try {
-            $table = $this->readTable($file, filled($sheet) ? (string) $sheet : null, $headerRow);
+            $table = $this->readTable($file, $this->toText($sheet), $this->toHeaderRow($headerRow));
         } catch (UnreadableSpreadsheet $exception) {
             return $exception->getMessage();
         }
@@ -476,21 +491,32 @@ class ImportAction extends FilamentImportAction
     }
 
     /**
+     * A filled string from form state or an evaluated option, or null.
+     */
+    protected function toText(mixed $value): ?string
+    {
+        if (is_int($value) || is_float($value)) {
+            $value = (string) $value;
+        }
+
+        return (is_string($value) && $value !== '') ? $value : null;
+    }
+
+    /**
      * A local path for the upload (copied from cloud disks such as S3 once per request).
      */
     protected function getLocalPath(TemporaryUploadedFile $file): string
     {
         $path = $file->getRealPath();
 
-        if (is_string($path) && $path !== '' && is_file($path)) {
+        if ($path !== '' && is_file($path)) {
             return $path;
         }
 
-        static $copies = [];
         $key = $file->getFilename();
 
-        if (isset($copies[$key]) && is_file($copies[$key])) {
-            return $copies[$key];
+        if (isset(static::$localCopies[$key]) && is_file(static::$localCopies[$key])) {
+            return static::$localCopies[$key];
         }
 
         $stream = $file->readStream();
@@ -512,6 +538,6 @@ class ImportAction extends FilamentImportAction
 
         register_shutdown_function(static fn () => @unlink($target));
 
-        return $copies[$key] = $target;
+        return static::$localCopies[$key] = $target;
     }
 }
