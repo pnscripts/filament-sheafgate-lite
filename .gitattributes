@@ -1,0 +1,11 @@
+# Keep the Composer package small: only src/, resources/ and the docs files ship.
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/docs export-ignore
+/listing export-ignore
+/tests export-ignore
+/tools export-ignore
+/phpunit.xml.dist export-ignore
+/phpstan.neon.dist export-ignore
+/build.sh export-ignore
+/.github export-ignore
