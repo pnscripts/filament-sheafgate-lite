@@ -36,7 +36,7 @@ await p.reload({ waitUntil: 'networkidle' });
 
 // 1. Workbook: sheet, header row below a title, mapping with examples
 let modal = await openModal();
-check(/Upload an XLSX, ODS or CSV file/.test(await text(modal)), 'upload field asks for XLSX, ODS or CSV');
+check(await modal.getByText('Upload an XLSX, ODS or CSV file').first().waitFor({ timeout: 10000 }).then(() => true, () => false), 'upload field asks for XLSX, ODS or CSV');
 await modal.locator('input[type=file]').setInputFiles(process.env.DEMO_FILE);
 await modal.getByText('Sheet “Spring update”, column names in row 3.').waitFor({ timeout: 20000 });
 await settle(1500);

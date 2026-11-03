@@ -103,7 +103,7 @@ Filament importers receive text. Sheafgate Lite writes cells the way a person re
 
 ### Limits
 
-Reading stops with a clear message after 50 000 data rows, or one row past `maxRows()` when you set it (Filament then refuses the file with its own message). A workbook is refused before it is parsed when a part of it would unpack to more than 256 MB or to more than 200 times its packed size. Change the defaults in a service provider:
+Reading stops with a clear message after 50 000 data rows, or one row past `maxRows()` when you set it (Filament then refuses the file with its own message). Every part of a workbook is unpacked once before it is parsed and the bytes it really produces are counted (the sizes an archive states can be false): a part may unpack to 10 MB, or to 100 times its packed size when larger, and the whole workbook to 256 MB. Cells over 32,767 characters (the spreadsheet maximum) and broken XML give a clear message, never an error page. Change the defaults in a service provider:
 
 ```php
 \PNScripts\SheafgateLite\Reader\SpreadsheetReader::$maxRows = 100000;
