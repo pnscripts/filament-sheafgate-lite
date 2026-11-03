@@ -14,6 +14,7 @@ final class Table
     /**
      * @param  list<string>  $headers
      * @param  Closure(): iterable<int, list<string>>  $cells  data rows keyed by 1-based row number
+     * @param  array<int, list<string>>  $preview  the first non-empty rows below the header, already read
      */
     public function __construct(
         public readonly string $format,
@@ -24,6 +25,7 @@ final class Table
         public readonly ?string $encoding = null,
         public readonly ?string $delimiter = null,
         public readonly ?int $maxRows = null,
+        private readonly array $preview = [],
     ) {}
 
     /**
@@ -63,6 +65,16 @@ final class Table
     public function sample(int $limit = 5): array
     {
         $sample = [];
+        $width = count($this->headers);
+
+        // The rows the header detection already read are enough when there are as many.
+        if (count($this->preview) >= $limit && $width > 0) {
+            foreach (array_slice($this->preview, 0, $limit, true) as $number => $cells) {
+                $sample[$number] = array_combine($this->headers, array_slice(array_pad($cells, $width, ''), 0, $width));
+            }
+
+            return $sample;
+        }
 
         foreach ($this->rows(limited: false) as $number => $row) {
             $sample[$number] = $row;

@@ -9,7 +9,7 @@ What it adds to Filament's CSV-only import:
 - **CSV that just works:** UTF-8 (with or without BOM), UTF-16 (Excel's "Unicode text"), Windows-1251 and Windows-1252 are detected, as are comma, semicolon, tab and vertical-bar separators. Filament's own detection never reaches Windows-1251/1252 or UTF-16.
 - **The header row is found** below title rows and notes, and people can correct it in the modal.
 - **Merged, blank and duplicate header cells** get usable names ("Size", "Size (2)", "Column C").
-- **ODS read by its own streaming reader,** which keeps merged cells in their columns and reads `false` as false (OpenSpout, which reads the XLSX files, shifts columns after merged ODS cells).
+- **ODS read by its own streaming reader,** which keeps merged cells in their columns and reads `false` as false (common PHP readers shift columns after merged ODS cells).
 - **Example values in the mapping:** "Price (e.g. 19.9)".
 - **Safe limits:** 50 000 data rows by default and a check of the unpacked size before a workbook is parsed.
 
@@ -71,7 +71,6 @@ If you have not used Filament's importer yet, follow Filament's [import action g
 - PHP 8.2 or newer
 - Laravel 12 or 13
 - Filament 5.8 or newer
-- `openspout/openspout` 4.26 or newer, which Filament 5 already installs
 
 Tested with the full test suite (94 tests) on:
 
@@ -103,6 +102,16 @@ Filament importers receive text. Sheafgate Lite writes cells the way a person re
 
 ### Limits
 
+Measured on the build machine (4 cores, busy with other builds, PHP 8.4) with a 1.7 MB LibreOffice XLSX of 40,000 rows and 7 columns, `php tools/benchmark.php <file>`:
+
+| Step | Time |
+|---|---|
+| Upload: archive check, sheet list, header row, mapping examples (first request) | 0.6 to 0.8 s |
+| The same file on later requests (cached per upload) | under 0.01 s |
+| Reading all 40,000 rows | 2.2 to 5.3 s |
+
+Filament's import then runs in queued chunks. Hostile files (lying archive sizes, huge shared strings, one huge cell) are refused in 0.1 to 1.4 s.
+
 Reading stops with a clear message after 50 000 data rows, or one row past `maxRows()` when you set it (Filament then refuses the file with its own message). Every part of a workbook is unpacked once before it is parsed and the bytes it really produces are counted (the sizes an archive states can be false): a part may unpack to 10 MB, or to 100 times its packed size when larger, and the whole workbook to 256 MB. Cells over 32,767 characters (the spreadsheet maximum) and broken XML give a clear message, never an error page. Change the defaults in a service provider:
 
 ```php
@@ -116,9 +125,9 @@ Reading stops with a clear message after 50 000 data rows, or one row past `maxR
 php artisan vendor:publish --tag=sheafgate-lite-translations
 ```
 
-## Why OpenSpout and an own ODS reader
+## Why own readers
 
-XLSX files are read with [OpenSpout](https://github.com/openspout/openspout) (MIT licence): it streams rows instead of loading the workbook, and Filament 5 already depends on it, so Sheafgate Lite adds no new package. ODS files are read by a small streaming reader in this package, because OpenSpout drops merged ("covered") ODS cells, which shifts later columns, and reads LibreOffice's `false` booleans as true. The tests read real files saved by LibreOffice 24.2.
+XLSX and ODS files are read by two small streaming readers in this package (`src/Reader`), one pass over the sheet XML with PHP's XMLReader. An earlier version read XLSX with OpenSpout: on a 1.7 MB, 40,000-row LibreOffice workbook it needed 73 s to read all rows, and the import modal took about 27 s per upload. The own reader needs 2 to 5 s for all rows and 0.6 to 0.8 s for the upload step on the same file (see Limits). It also reads formulas saved without a result and error cells as such, keeps merged ODS cells in their columns and reads LibreOffice's `false` correctly. CSV files are parsed with `league/csv`, which Filament already uses. Sheafgate Lite adds no package of its own beyond Filament. The tests read real files saved by LibreOffice 24.2.
 
 ## Not included
 

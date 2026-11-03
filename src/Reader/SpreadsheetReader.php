@@ -3,15 +3,13 @@
 namespace PNScripts\SheafgateLite\Reader;
 
 use League\Csv\Reader as CsvReader;
-use OpenSpout\Reader\XLSX\Options as XlsxOptions;
-use OpenSpout\Reader\XLSX\Reader as XlsxReader;
 use PNScripts\SheafgateLite\Exceptions\UnreadableSpreadsheet;
 use Throwable;
 use ZipArchive;
 
 /**
- * Reads XLSX workbooks (streamed with OpenSpout), ODS workbooks (streamed with our own
- * OdsSheets) and CSV/TSV files (any common encoding and delimiter) as tables of text.
+ * Reads XLSX workbooks (XlsxSheets) and ODS workbooks (OdsSheets), both streamed by this
+ * package, and CSV/TSV files (any common encoding and delimiter) as tables of text.
  */
 final class SpreadsheetReader
 {
@@ -45,6 +43,8 @@ final class SpreadsheetReader
 
     /** @var list<string>|null */
     private ?array $sheetNames = null;
+
+    private ?XlsxSheets $xlsxSheets = null;
 
     /** @var array<string, array<int, list<string>>> the first rows of each sheet, read once */
     private array $previews = [];
@@ -216,9 +216,30 @@ final class SpreadsheetReader
             return $this->sheetNames = [];
         }
 
+        $cache = self::cachePath($this->path, 'sheets');
+        $cached = $cache !== null && is_file($cache) ? json_decode((string) file_get_contents($cache), true) : null;
+
+        if (is_array($cached)) {
+            return $this->sheetNames = array_values(array_map(fn (mixed $name): string => is_scalar($name) ? (string) $name : '', $cached));
+        }
+
+        $this->sheetNames = $this->readSheetNames();
+
+        if ($cache !== null) {
+            @file_put_contents($cache, (string) json_encode($this->sheetNames, JSON_UNESCAPED_UNICODE));
+        }
+
+        return $this->sheetNames;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function readSheetNames(): array
+    {
         if ($this->format === 'ods') {
             try {
-                return $this->sheetNames = (new OdsSheets($this->path))->names();
+                return (new OdsSheets($this->path))->names();
             } catch (UnreadableSpreadsheet $exception) {
                 throw $exception;
             } catch (Throwable $exception) {
@@ -226,20 +247,18 @@ final class SpreadsheetReader
             }
         }
 
-        $visible = [];
-        $all = [];
+        try {
+            $sheets = $this->xlsx()->sheets();
+        } catch (UnreadableSpreadsheet $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            throw UnreadableSpreadsheet::because('unreadable', $exception);
+        }
 
-        $this->withReader(function (XlsxReader $reader) use (&$visible, &$all): void {
-            foreach ($reader->getSheetIterator() as $sheet) {
-                $all[] = $sheet->getName();
+        $all = array_column($sheets, 'name');
+        $visible = array_column(array_filter($sheets, fn (array $sheet): bool => $sheet['visible']), 'name');
 
-                if ($sheet->isVisible()) {
-                    $visible[] = $sheet->getName();
-                }
-            }
-        });
-
-        return $this->sheetNames = ($visible !== [] ? $visible : $all);
+        return $visible !== [] ? $visible : $all;
     }
 
     /**
@@ -326,7 +345,10 @@ final class SpreadsheetReader
             throw UnreadableSpreadsheet::because('no_header');
         }
 
-        $headers = Headers::normalize($headerCells, $this->headerMerges($sheet, (int) $headerRow));
+        // Merged header cells show up as blanks between filled cells; without blanks there is nothing to look up.
+        $width = Headers::width($headerCells);
+        $hasBlanks = in_array('', array_map('trim', array_slice($headerCells, 0, $width)), true);
+        $headers = Headers::normalize($headerCells, $hasBlanks ? $this->cachedHeaderMerges($sheet, (int) $headerRow) : []);
         $first = (int) $headerRow;
 
         return new Table(
@@ -344,6 +366,7 @@ final class SpreadsheetReader
             encoding: $this->csv()?->encoding,
             delimiter: $this->csv()?->delimiter,
             maxRows: $this->rowLimit ?? self::$maxRows,
+            preview: array_filter($preview, fn (int $number): bool => $number > $first, ARRAY_FILTER_USE_KEY),
         );
     }
 
@@ -421,42 +444,7 @@ final class SpreadsheetReader
             return;
         }
 
-        $reader = $this->makeReader();
-
-        try {
-            $reader->open($this->path);
-        } catch (Throwable $exception) {
-            throw UnreadableSpreadsheet::because('unreadable', $exception);
-        }
-
-        try {
-            foreach ($reader->getSheetIterator() as $candidate) {
-                if ($candidate->getName() !== $sheet) {
-                    continue;
-                }
-
-                $withoutResult = XlsxFormulas::withoutResult($this->path, (string) $sheet);
-
-                foreach ($candidate->getRowIterator() as $number => $row) {
-                    $number = is_int($number) ? $number : 0;
-                    $cells = array_map(CellValue::toText(...), array_values($row->getCells()));
-
-                    if ($withoutResult !== []) {
-                        foreach ($cells as $column => $value) {
-                            if (isset($withoutResult[Headers::letter($column) . $number])) {
-                                $cells[$column] = CellValue::FORMULA;
-                            }
-                        }
-                    }
-
-                    yield $number => $cells;
-                }
-
-                break;
-            }
-        } finally {
-            $reader->close();
-        }
+        yield from $this->xlsx()->rows((string) $sheet);
     }
 
     private function resolveSheet(?string $sheet): ?string
@@ -491,6 +479,27 @@ final class SpreadsheetReader
     }
 
     /**
+     * @return list<array{0: int, 1: int}>
+     */
+    private function cachedHeaderMerges(?string $sheet, int $headerRow): array
+    {
+        $cache = self::cachePath($this->path, 'merges', $sheet . '|' . $headerRow);
+        $cached = $cache !== null && is_file($cache) ? json_decode((string) file_get_contents($cache), true) : null;
+
+        if (is_array($cached)) {
+            return array_values(array_map(fn (mixed $pair): array => [is_array($pair) && is_numeric($pair[0] ?? null) ? (int) $pair[0] : 0, is_array($pair) && is_numeric($pair[1] ?? null) ? (int) $pair[1] : 0], $cached));
+        }
+
+        $merges = $this->headerMerges($sheet, $headerRow);
+
+        if ($cache !== null) {
+            @file_put_contents($cache, (string) json_encode($merges));
+        }
+
+        return $merges;
+    }
+
+    /**
      * Merged cells that span several columns of the header row.
      *
      * @return list<array{0: int, 1: int}>
@@ -515,23 +524,15 @@ final class SpreadsheetReader
     {
         $merges = [];
 
-        $this->withReader(function (XlsxReader $reader) use ($sheet, $headerRow, &$merges): void {
-            foreach ($reader->getSheetIterator() as $candidate) {
-                if ($candidate->getName() !== $sheet) {
-                    continue;
-                }
-
-                foreach ($candidate->getMergeCells() as $range) {
-                    if (! preg_match('/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/', strtoupper($range), $m)) {
-                        continue;
-                    }
-
-                    if ((int) $m[2] <= $headerRow && (int) $m[4] >= $headerRow && $m[1] !== $m[3]) {
-                        $merges[] = [Headers::columnIndex($m[1]), Headers::columnIndex($m[3])];
-                    }
-                }
+        foreach ($this->xlsx()->merges((string) $sheet) as $range) {
+            if (! preg_match('/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/', strtoupper($range), $m)) {
+                continue;
             }
-        }, loadMerges: true);
+
+            if ((int) $m[2] <= $headerRow && (int) $m[4] >= $headerRow && $m[1] !== $m[3]) {
+                $merges[] = [Headers::columnIndex($m[1]), Headers::columnIndex($m[3])];
+            }
+        }
 
         return $merges;
     }
@@ -545,39 +546,8 @@ final class SpreadsheetReader
         return $this->csv ??= CsvSource::open($this->path, $this->csvEncoding, $this->csvDelimiter);
     }
 
-    private function makeReader(bool $loadMerges = false): XlsxReader
+    private function xlsx(): XlsxSheets
     {
-        $options = new XlsxOptions;
-        $options->SHOULD_FORMAT_DATES = false;
-        // Empty rows are kept so the row numbers match the ones the spreadsheet shows.
-        $options->SHOULD_PRESERVE_EMPTY_ROWS = true;
-
-        $options->SHOULD_LOAD_MERGE_CELLS = $loadMerges;
-
-        return new XlsxReader($options);
-    }
-
-    /**
-     * @param  callable(XlsxReader): void  $callback
-     */
-    private function withReader(callable $callback, bool $loadMerges = false): void
-    {
-        $reader = $this->makeReader($loadMerges);
-
-        try {
-            $reader->open($this->path);
-        } catch (Throwable $exception) {
-            throw UnreadableSpreadsheet::because('unreadable', $exception);
-        }
-
-        try {
-            $callback($reader);
-        } catch (UnreadableSpreadsheet $exception) {
-            throw $exception;
-        } catch (Throwable $exception) {
-            throw UnreadableSpreadsheet::because('unreadable', $exception);
-        } finally {
-            $reader->close();
-        }
+        return $this->xlsxSheets ??= new XlsxSheets($this->path);
     }
 }
