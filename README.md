@@ -36,7 +36,7 @@ If you have not used Filament's importer yet, follow Filament's [import action g
 | | |
 |---|---|
 | ![A Windows-1252 CSV separated by semicolons: the modal says how it was read and shows “Crème Linen Apron”](docs/images/csv.jpg) | ![After the import: Filament's notification with the count and the failed-rows download](docs/images/result.jpg) |
-| CSV in UTF-8, UTF-16, Windows-1251 or Windows-1252, with commas, semicolons, tabs or vertical bars: detected and shown. | Filament's own import runs: chunks, notifications and the failed-rows file. |
+| CSV in UTF-8, UTF-16, Windows-1251 or Windows-1252, with commas, semicolons, tabs or vertical bars: detected and shown. | Filament's own import runs: chunks, notifications and the failed-rows file. Values are imported as Filament reads them: the “12,50” of the demo file became 1,250.00 (see Not included). |
 
 - **Workbooks:** `.xlsx` (Excel, LibreOffice, Google Sheets exports) and `.ods`. When a workbook has several sheets, a **Sheet** field appears; the first sheet with data is chosen.
 - **Header row found for you:** title rows, notes and blank rows above the table are skipped; the **Header row** field lets people correct it.
