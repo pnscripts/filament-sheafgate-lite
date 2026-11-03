@@ -11,7 +11,7 @@ const shots = process.env.SHOTS || '';
 const profile = process.env.CHROME_PROFILE || `${os.tmpdir()}/sheafgate-lite-chrome`;
 fs.rmSync(profile, { recursive: true, force: true });
 const ctx = await chromium.launchPersistentContext(profile, {
-  channel: 'chrome', headless: true, viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1,
+  channel: 'chrome', headless: true, viewport: { width: 1600, height: 900 }, deviceScaleFactor: Number(process.env.DSF || 1),
   args: ['--headless=new', '--mute-audio', '--disable-speech-api', '--no-first-run'],
 });
 const p = ctx.pages()[0] || await ctx.newPage();
