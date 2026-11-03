@@ -61,6 +61,7 @@ Tested with the full test suite (87 tests) on:
 | PHP | Laravel | Filament | Livewire | OpenSpout |
 |---|---|---|---|---|
 | 8.4.27 | 13.40.0 | 5.11.1 | 4.4.8 | 4.32.0 |
+| 8.2.35 | 12.71.0 | 5.8.4 | 4.4.8 | 4.28.5 |
 
 The release archive was installed in fresh Laravel apps (Laravel 13 with Filament 5.11 on PHP 8.4, and Laravel 12 with Filament 5.8 on PHP 8.2) and the flow above passed in headless Chrome. The screenshots come from that app.
 

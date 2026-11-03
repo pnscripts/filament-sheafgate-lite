@@ -74,6 +74,8 @@ abstract class TestCase extends Orchestra
         $app['config']->set('database.default', 'testing');
         $app['config']->set('app.key', 'base64:' . base64_encode(str_repeat('s', 32)));
         $app['config']->set('auth.providers.users.model', User::class);
+        // Filament's Import model looks up the user model through this binding (5.8 has no other fallback in a package).
+        $app->bind(\Illuminate\Contracts\Auth\Authenticatable::class, User::class);
         $app['config']->set('queue.default', 'sync');
         $app['config']->set('queue.batching.database', 'testing');
     }

@@ -12,7 +12,6 @@ use PNScripts\SheafgateLite\Tests\Fixtures\Models\User;
 use PNScripts\SheafgateLite\Tests\Fixtures\Resources\ProductResource;
 use PNScripts\SheafgateLite\Tests\Fixtures\Resources\ProductResource\Pages\ListProducts;
 
-use function Pest\Livewire\livewire;
 
 /**
  * The text under the upload field for the mounted import action.
@@ -183,6 +182,9 @@ it('keeps Filament\'s validation, failed rows and their download', function () {
         ->and(FailedImportRow::query()->pluck('validation_error')->implode(' '))->toContain('name field is required')->toContain('price field must be at least 0');
 
     $url = URL::signedRoute('filament.imports.failed-rows.download', ['authGuard' => 'web', 'import' => $import], absolute: false);
+    // Filament 5.8's sync import job signs the user out of the guard when it finishes; a real
+    // download is a new request with its own session.
+    $this->actingAs($this->user);
     $response = $this->get($url);
     $response->assertOk();
 

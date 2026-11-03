@@ -33,3 +33,13 @@ function tempFileWith(string $bytes, string $suffix = '.csv'): string
 
     return $path;
 }
+
+/**
+ * Livewire's own test helper (the Pest plugin needs PHP 8.3 with Livewire 4; this runs on 8.2 too).
+ *
+ * @param  array<string, mixed>  $params
+ */
+function livewire(string $component, array $params = []): \Livewire\Features\SupportTesting\Testable
+{
+    return \Livewire\Livewire::test($component, $params);
+}
