@@ -27,8 +27,16 @@ final class SpreadsheetReader
     /** Largest unpacked size of one file inside an XLSX/ODS archive. */
     public static int $maxEntryBytes = self::DEFAULT_MAX_ENTRY_BYTES;
 
-    /** Larger entries may not unpack to more than this many times their packed size. */
-    public const MAX_RATIO = 200;
+    /** Parts above 10 MB unpacked may not be more than this many times their packed size. */
+    public const MAX_RATIO = 100;
+
+    /** The most characters a spreadsheet cell can hold in Excel and LibreOffice. */
+    public const MAX_CELL_LENGTH = 32767;
+
+    /** How many times a workbook was read row by row (for tests and diagnostics). */
+    public static int $parses = 0;
+
+    
 
     /** The row limit of this reader (defaults to $maxRows). */
     public ?int $rowLimit = null;
@@ -37,6 +45,9 @@ final class SpreadsheetReader
 
     /** @var list<string>|null */
     private ?array $sheetNames = null;
+
+    /** @var array<string, array<int, list<string>>> the first rows of each sheet, read once */
+    private array $previews = [];
 
     private function __construct(
         public readonly string $path,
@@ -73,7 +84,13 @@ final class SpreadsheetReader
                 throw UnreadableSpreadsheet::because('unreadable');
             }
 
-            self::assertSafeArchive($zip);
+            try {
+                self::assertSafeArchive($zip, $path);
+            } catch (UnreadableSpreadsheet $exception) {
+                $zip->close();
+
+                throw $exception;
+            }
 
             $mimetype = $zip->getFromName('mimetype');
             $isXlsx = $zip->locateName('xl/workbook.xml') !== false;
@@ -103,27 +120,85 @@ final class SpreadsheetReader
      * Refuses archives that unpack to far more than they weigh (a "zip bomb") before any
      * entry is parsed: the sizes are read from the archive's directory.
      */
-    private static function assertSafeArchive(ZipArchive $zip): void
+    private static function assertSafeArchive(ZipArchive $zip, string $path): void
     {
-        $total = 0;
+        // An archive checked once is not unpacked again on every Livewire request.
+        $marker = self::cachePath($path, 'safe');
 
+        if ($marker !== null && is_file($marker)) {
+            return;
+        }
+
+        $total = 0;
+        $tooLarge = fn (): UnreadableSpreadsheet => UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) round(self::$maxEntryBytes / 1024 / 1024)]);
+
+        // The sizes in the archive's directory can lie, so every part is unpacked here and the
+        // bytes it really produces are counted, stopping at the first limit it passes.
         for ($index = 0; $index < $zip->numFiles; $index++) {
             $stat = $zip->statIndex($index);
+            $name = $stat === false ? false : $zip->getNameIndex($index);
 
-            if ($stat === false) {
+            if ($stat === false || $name === false || str_ends_with($name, '/')) {
                 continue;
             }
 
-            $size = (int) $stat['size'];
             $packed = max(1, (int) $stat['comp_size']);
-            $total += $size;
+            $limit = min(self::$maxEntryBytes, max(10 * 1024 * 1024, $packed * self::MAX_RATIO));
+            $stream = $zip->getStream($name);
 
-            if ($size > self::$maxEntryBytes || $total > self::$maxEntryBytes * 2 || ($size > 10 * 1024 * 1024 && $size / $packed > self::MAX_RATIO)) {
-                $zip->close();
+            if ($stream === false) {
+                throw UnreadableSpreadsheet::because('unreadable');
+            }
 
-                throw UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) round(self::$maxEntryBytes / 1024 / 1024)]);
+            $size = 0;
+
+            try {
+                while (! feof($stream)) {
+                    $chunk = fread($stream, 1024 * 1024);
+
+                    if ($chunk === false) {
+                        throw UnreadableSpreadsheet::because('unreadable');
+                    }
+
+                    $size += strlen($chunk);
+                    $total += strlen($chunk);
+
+                    if ($size > $limit || $total > self::$maxEntryBytes) {
+                        throw $tooLarge();
+                    }
+
+                    if ($chunk === '') {
+                        break;
+                    }
+                }
+            } finally {
+                fclose($stream);
             }
         }
+
+        if ($marker !== null) {
+            @touch($marker);
+        }
+    }
+
+    /**
+     * A file in the system temp folder tied to this upload's path, size and change time.
+     */
+    private static function cachePath(string $path, string $kind, string $extra = ''): ?string
+    {
+        $stat = @stat($path);
+
+        if ($stat === false) {
+            return null;
+        }
+
+        $folder = sys_get_temp_dir() . '/sheafgate-cache';
+
+        if (! is_dir($folder) && ! @mkdir($folder, 0700, true) && ! is_dir($folder)) {
+            return null;
+        }
+
+        return $folder . '/' . sha1($path . '|' . $stat['size'] . '|' . $stat['mtime'] . '|' . $kind . '|' . $extra);
     }
 
     /**
@@ -188,21 +263,47 @@ final class SpreadsheetReader
      */
     public function preview(?string $sheet = null, int $limit = self::PREVIEW_ROWS): array
     {
-        $rows = [];
+        $key = (string) $this->resolveSheet($sheet);
 
-        foreach ($this->cells($sheet) as $number => $cells) {
-            if (implode('', array_map('trim', $cells)) === '') {
-                continue;
-            }
+        if (! isset($this->previews[$key])) {
+            $cache = self::cachePath($this->path, 'preview', $key . '|' . $this->csvEncoding . '|' . $this->csvDelimiter);
+            $cached = $cache !== null && is_file($cache) ? json_decode((string) file_get_contents($cache), true) : null;
 
-            $rows[$number] = $cells;
+            if (is_array($cached)) {
+                $this->previews[$key] = [];
 
-            if (count($rows) >= $limit) {
-                break;
+                foreach ($cached as $number => $cells) {
+                    if (is_array($cells)) {
+                        $this->previews[$key][(int) $number] = array_values(array_map(fn (mixed $cell): string => is_scalar($cell) ? (string) $cell : '', $cells));
+                    }
+                }
+            } else {
+                $rows = [];
+
+                foreach ($this->cells($sheet) as $number => $cells) {
+                    if (implode('', array_map('trim', $cells)) === '') {
+                        continue;
+                    }
+
+                    $rows[$number] = $cells;
+
+                    if (count($rows) >= self::PREVIEW_ROWS) {
+                        break;
+                    }
+                }
+
+                $this->previews[$key] = $rows;
+
+                if ($cache !== null) {
+                    @file_put_contents($cache, json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE));
+                }
             }
         }
 
-        return $rows;
+        /** @var array<int, list<string>> $rows */
+        $rows = $this->previews[$key];
+
+        return array_slice($rows, 0, $limit, true);
     }
 
     /**
@@ -262,6 +363,42 @@ final class SpreadsheetReader
      * @return \Generator<int, list<string>>
      */
     public function cells(?string $sheet = null): \Generator
+    {
+        self::$parses++;
+        $scanned = 0;
+        $maxScanned = max(100000, ($this->rowLimit ?? self::$maxRows) * 4);
+        $previous = libxml_use_internal_errors(true);
+
+        try {
+            foreach ($this->readCells($sheet) as $number => $cells) {
+                // Empty rows count too: a sheet can claim a row number in the millions.
+                if (++$scanned > $maxScanned) {
+                    throw UnreadableSpreadsheet::because('too_many_rows', replace: ['max' => number_format($this->rowLimit ?? self::$maxRows)]);
+                }
+
+                foreach ($this->format === 'csv' ? [] : $cells as $value) {
+                    if (strlen($value) > self::MAX_CELL_LENGTH && mb_strlen($value) > self::MAX_CELL_LENGTH) {
+                        throw UnreadableSpreadsheet::because('cell_too_long', replace: ['max' => number_format(self::MAX_CELL_LENGTH)]);
+                    }
+                }
+
+                yield $number => $cells;
+            }
+        } catch (UnreadableSpreadsheet $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            // Broken XML, a damaged archive or a reader failure: a clear message, never an error page.
+            throw UnreadableSpreadsheet::because('unreadable', $exception);
+        } finally {
+            libxml_clear_errors();
+            libxml_use_internal_errors($previous);
+        }
+    }
+
+    /**
+     * @return \Generator<int, list<string>>
+     */
+    private function readCells(?string $sheet): \Generator
     {
         $csv = $this->csv();
 
