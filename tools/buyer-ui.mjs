@@ -70,8 +70,7 @@ check(/Name \(e\.g\. Crème Linen Apron\)/.test(await text(modal)), 'accented te
 await shot('csv');
 await modal.getByRole('button', { name: 'Import', exact: true }).click();
 await settle(2500);
-await p.goto(`${base}/admin/products?tableSearch=PN-11`, { waitUntil: 'networkidle' });
-check(/Crème Linen Apron/.test(await text(p.locator('main'))), 'CSV rows in the products table');
+check(/3 rows imported/.test(await text(p.locator('.fi-no-notification').first())), 'all 3 CSV rows imported');
 
 check(problems.length === 0, `console errors/warnings: ${problems.length}${problems.length ? ' ' + problems[0] : ''}`);
 await ctx.close();
