@@ -21,19 +21,37 @@ it('refuses a row beyond the last spreadsheet row', function () {
 })->throws(UnreadableSpreadsheet::class);
 
 it('reads millions of shared strings within a 128 MB memory limit', function () {
-    $strings = '';
     $cells = '';
-
-    for ($i = 0; $i < 3000000; $i++) {
-        $strings .= "<si><t>string number {$i}</t></si>";
-    }
 
     for ($i = 2; $i <= 1001; $i++) {
         $cells .= "<row r=\"{$i}\"><c r=\"A{$i}\" t=\"s\"><v>" . ($i * 2999) . "</v></c><c r=\"B{$i}\" t=\"s\"><v>{$i}</v></c></row>";
     }
 
-    $path = zipWith(xlsxWithSheet(LIMITS_HEADER . $cells, $strings));
-    unset($strings);
+    // The 100 MB of shared strings are written to a file in pieces: the test itself runs at 128M too.
+    $entries = xlsxWithSheet(LIMITS_HEADER . $cells, '');
+    $strings = tempnam(sys_get_temp_dir(), 'sheafgate-sst-');
+    $handle = fopen($strings, 'wb');
+    fwrite($handle, '<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">');
+
+    for ($i = 0; $i < 3000000; $i += 10000) {
+        $piece = '';
+
+        for ($j = $i; $j < $i + 10000; $j++) {
+            $piece .= "<si><t>string number {$j}</t></si>";
+        }
+
+        fwrite($handle, $piece);
+    }
+
+    fwrite($handle, '</sst>');
+    fclose($handle);
+    unset($entries['xl/sharedStrings.xml']);
+    $path = zipWith($entries);
+    $zip = new ZipArchive;
+    $zip->open($path);
+    $zip->addFile($strings, 'xl/sharedStrings.xml');
+    $zip->close();
+    @unlink($strings);
 
     [$code, $output] = readInChildProcess($path);
 

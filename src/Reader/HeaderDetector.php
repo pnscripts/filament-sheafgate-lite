@@ -10,17 +10,29 @@ namespace PNScripts\SheafgateLite\Reader;
  *    importer columns wins.
  * 2. Otherwise, the first row of text cells that is about as wide as the table.
  * 3. Otherwise, the first non-empty row.
+ *
+ * Rows that come from repeat attributes, rows with values past the column budget and rows
+ * without a real value (only blanks, errors or formulas without a result) are never taken
+ * for the header while another row can be.
  */
 final class HeaderDetector
 {
     /**
      * @param  array<int, list<string>>  $rows  first non-empty rows keyed by 1-based row number
      * @param  array<string, list<string>>  $guesses  lower-case guesses per importer column
+     * @param  array<int, string>  $flags  row number => "repeated" or "wide" (see SpreadsheetReader::flags())
      */
-    public static function detect(array $rows, array $guesses = []): ?int
+    public static function detect(array $rows, array $guesses = [], array $flags = []): ?int
     {
         if ($rows === []) {
             return null;
+        }
+
+        $all = $rows;
+        $rows = array_filter($rows, fn (array $cells, int $number): bool => ! isset($flags[$number]) && self::real($cells) > 0, ARRAY_FILTER_USE_BOTH);
+
+        if ($rows === []) {
+            return array_key_first($all);
         }
 
         if ($guesses !== []) {
@@ -70,6 +82,16 @@ final class HeaderDetector
         }
 
         return array_key_first($rows);
+    }
+
+    /**
+     * Cells with a real value: not blank, not an error or a formula without a result.
+     *
+     * @param  list<string>  $cells
+     */
+    private static function real(array $cells): int
+    {
+        return count(array_filter($cells, fn (string $cell): bool => trim($cell) !== '' && ! CellValue::isProblem($cell)));
     }
 
     /**

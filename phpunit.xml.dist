@@ -10,6 +10,10 @@
             <directory>tests/Unit</directory>
         </testsuite>
     </testsuites>
+    <php>
+        <!-- PHP's default: every test, the hostile-file ones included, must pass at 128M. -->
+        <ini name="memory_limit" value="128M"/>
+    </php>
     <source>
         <include>
             <directory>src</directory>

@@ -3,7 +3,6 @@
 namespace PNScripts\SheafgateLite\Reader;
 
 use Closure;
-use League\Csv\Reader as CsvReader;
 use PNScripts\SheafgateLite\Exceptions\UnreadableSpreadsheet;
 use Throwable;
 use ZipArchive;
@@ -59,14 +58,52 @@ final class SpreadsheetReader
      */
     public static int $maxCellElements = self::DEFAULT_MAX_CELL_ELEMENTS;
 
+    public const DEFAULT_MAX_NODES = 32000000;
+
+    /**
+     * XML nodes of every type (elements, end tags, text, whitespace, comments, processing
+     * instructions) one reader may step over in all its passes together. A 50,000-row
+     * sheet of 80 inline-text columns is about 28 million.
+     */
+    public static int $maxNodes = self::DEFAULT_MAX_NODES;
+
+    public const DEFAULT_MAX_MARKUP_NODES = 10000;
+
+    /**
+     * Comments and processing instructions one reader may meet: libxml keeps every one it
+     * has passed in memory until the part is closed, and real workbooks have next to none.
+     */
+    public static int $maxMarkupNodes = self::DEFAULT_MAX_MARKUP_NODES;
+
+    /** The most columns a table may have: the header's real extent may not pass it. */
+    public const MAX_HEADER_COLUMNS = 1024;
+
+    /** Columns kept of a row before the header is known (one more, to see a header that is too wide). */
+    public const PREVIEW_COLUMNS = self::MAX_HEADER_COLUMNS + 1;
+
+    /** The text one row may keep; a row of longer cells is refused. */
+    public const MAX_ROW_BYTES = 4 * 1024 * 1024;
+
+    /** The text the preview keeps at most; it ends early past this. */
+    public const PREVIEW_BYTES = 8 * 1024 * 1024;
+
+    public const DEFAULT_MAX_IMPORT_BYTES = 128 * 1024 * 1024;
+
+    /**
+     * What one import may hand on to be stored, counted as the rows are stored (header names
+     * and values of every row, padding included): a 50,000-row sheet of 80 columns of 30
+     * characters is about 120 MB.
+     */
+    public static int $maxImportBytes = self::DEFAULT_MAX_IMPORT_BYTES;
+
     /** The row limit of this reader (defaults to $maxRows). */
     public ?int $rowLimit = null;
 
-    /** Elements walked so far by this reader (see $maxRowElements). */
-    private int $rowElements = 0;
+    /** What this reader has done so far, against its limits. */
+    private ?Budget $budget = null;
 
-    /** Cell elements read so far by this reader (see $maxCellElements). */
-    private int $cellElements = 0;
+    /** @var array<string, array<int, string>> per preview key: row number => "repeated" or "wide" */
+    private array $flags = [];
 
     /** The first sheet with data, once found (false: not looked for yet). */
     private string|null|false $firstSheet = false;
@@ -155,14 +192,98 @@ final class SpreadsheetReader
     /** More parts than any real workbook has; checked on the archive directory first. */
     public const MAX_ARCHIVE_ENTRIES = 5000;
 
+    /**
+     * The longest stretch of an XML part without a "<". No text node or tag of a real
+     * workbook comes near it (a full cell is at most about 200 KB even with every character
+     * escaped), and libxml needs about ten times a token's size while it parses one: a
+     * 9.5 MB attribute alone took 110 MB. Stretches from LONG_RUN_WINDOW up are seen; from
+     * twice that, always.
+     */
+    public const LONG_RUN_WINDOW = 512 * 1024;
+
+    /** @var array<string, list<string>> per checked archive: parts with a stretch too long for XML */
+    private static array $longRuns = [];
+
+    /**
+     * Refuses to read a part as XML when the archive check found a stretch in it too long
+     * for any real token. Binary parts (images) may have such stretches; they are refused
+     * only when something points the reader at them.
+     */
+    public static function assertXmlPart(string $path, string $entry): void
+    {
+        $key = self::archiveKey($path);
+
+        if (! isset(self::$longRuns[$key])) {
+            $marker = self::cachePath($path, 'safe-r7');
+            $listed = $marker !== null && is_file($marker) ? json_decode((string) file_get_contents($marker), true) : null;
+
+            if (is_array($listed)) {
+                self::$longRuns[$key] = array_values(array_filter($listed, 'is_string'));
+            } else {
+                $zip = new ZipArchive;
+
+                if ($zip->open($path, ZipArchive::RDONLY) !== true) {
+                    throw UnreadableSpreadsheet::because('unreadable');
+                }
+
+                try {
+                    self::assertSafeArchive($zip, $path);
+                } finally {
+                    $zip->close();
+                }
+            }
+        }
+
+        if (in_array($entry, self::$longRuns[$key] ?? [], true)) {
+            throw UnreadableSpreadsheet::because('too_complex');
+        }
+    }
+
+    private static function archiveKey(string $path): string
+    {
+        $stat = @stat($path);
+
+        return $path . '|' . ($stat === false ? '' : $stat['size'] . '|' . $stat['mtime']);
+    }
+
+    /**
+     * Whether a chunk holds a stretch without "<" that covers a whole aligned window
+     * (checked window by window: strcspn stops at the first "<", a few bytes in for XML).
+     */
+    private static function hasLongRun(string $chunk): bool
+    {
+        $length = strlen($chunk);
+
+        for ($start = 0; $start + self::LONG_RUN_WINDOW <= $length; $start += self::LONG_RUN_WINDOW) {
+            if (strcspn($chunk, '<', $start, self::LONG_RUN_WINDOW) === self::LONG_RUN_WINDOW) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static function assertSafeArchive(ZipArchive $zip, string $path): void
     {
         // An archive checked once is not unpacked again on every Livewire request.
-        $marker = self::cachePath($path, 'safe');
+        $marker = self::cachePath($path, 'safe-r7');
+        $key = self::archiveKey($path);
 
-        if ($marker !== null && is_file($marker)) {
+        if (isset(self::$longRuns[$key])) {
             return;
         }
+
+        if ($marker !== null && is_file($marker)) {
+            $listed = json_decode((string) file_get_contents($marker), true);
+
+            if (is_array($listed)) {
+                self::$longRuns[$key] = array_values(array_filter($listed, 'is_string'));
+
+                return;
+            }
+        }
+
+        $longRuns = [];
 
         $tooLarge = fn (): UnreadableSpreadsheet => UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) round(self::$maxEntryBytes / 1024 / 1024)]);
 
@@ -171,6 +292,7 @@ final class SpreadsheetReader
         }
 
         $total = 0;
+        $markup = 0;
         $totalLimit = min(self::$maxEntryBytes, max(10 * 1024 * 1024, (int) filesize($path) * self::MAX_RATIO));
 
         // The sizes in the archive's directory can lie, so every entry is unpacked here and
@@ -195,6 +317,9 @@ final class SpreadsheetReader
             }
 
             $size = 0;
+            $carry = '';
+            $run = 0;
+            $long = false;
 
             try {
                 while (! feof($stream)) {
@@ -211,6 +336,32 @@ final class SpreadsheetReader
                         throw $tooLarge();
                     }
 
+                    // Comments and processing instructions, counted before libxml sees a
+                    // byte: its XMLReader parses a run of them ahead in one step and keeps
+                    // them all (a 3 MB upload reached 6 GB), so no count while reading could
+                    // stop it. XML declarations (<?xml ) are not counted; the last bytes of
+                    // a chunk are carried over, so a mark split between chunks is still seen.
+                    $buffer = $carry . $chunk;
+                    $markup += substr_count($buffer, '<?') - substr_count($carry, '<?') - substr_count($buffer, '<?xml ')
+                        + substr_count($buffer, '<!--') - substr_count($carry, '<!--');
+                    $carry = substr($buffer, -5);
+
+                    if ($markup > self::$maxMarkupNodes) {
+                        throw UnreadableSpreadsheet::because('too_complex');
+                    }
+
+                    // The stretch without "<" running on from the previous chunk, then the
+                    // windows inside this one.
+                    if (! $long && $chunk !== '') {
+                        $lead = strcspn($chunk, '<');
+                        $run += $lead;
+                        $long = $run >= self::LONG_RUN_WINDOW || self::hasLongRun($chunk);
+
+                        if ($lead < strlen($chunk)) {
+                            $run = strlen($chunk) - 1 - (int) strrpos($chunk, '<');
+                        }
+                    }
+
                     if ($chunk === '') {
                         break;
                     }
@@ -218,10 +369,16 @@ final class SpreadsheetReader
             } finally {
                 fclose($stream);
             }
+
+            if ($long) {
+                $longRuns[] = $name;
+            }
         }
 
+        self::$longRuns[$key] = $longRuns;
+
         if ($marker !== null) {
-            @touch($marker);
+            @file_put_contents($marker, (string) json_encode($longRuns));
         }
     }
 
@@ -335,7 +492,7 @@ final class SpreadsheetReader
     {
         if ($this->format === 'ods') {
             try {
-                $names = $this->withXmlErrors(fn (): array => (new OdsSheets($this->path, $this->spendCell(...)))->names());
+                $names = $this->withXmlErrors(fn (): array => (new OdsSheets($this->path, $this->budget()))->names());
 
                 if (count($names) > self::MAX_SHEETS) {
                     throw UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) round(self::$maxEntryBytes / 1024 / 1024)]);
@@ -385,7 +542,7 @@ final class SpreadsheetReader
             $found = $cache !== null && is_file($cache) ? (string) file_get_contents($cache) : null;
 
             if ($found === null) {
-                $found = (string) $this->withXmlErrors(fn (): ?string => (new OdsSheets($this->path, $this->spendCell(...)))->firstFilled($this->spendRowElement(...), self::PREVIEW_BLANK_ROWS));
+                $found = (string) $this->withXmlErrors(fn (): ?string => (new OdsSheets($this->path, $this->budget()))->firstFilled(self::PREVIEW_BLANK_ROWS));
 
                 if ($cache !== null) {
                     @file_put_contents($cache, $found);
@@ -435,23 +592,17 @@ final class SpreadsheetReader
     }
 
     /**
-     * Counts one walked element against this reader's budget.
+     * The budget of this reader, made when it is first needed (the row limit may be set first).
      */
-    private function spendRowElement(): void
+    private function budget(): Budget
     {
-        if (++$this->rowElements > self::$maxRowElements) {
-            throw UnreadableSpreadsheet::because('too_many_rows', replace: ['max' => number_format($this->rowLimit ?? self::$maxRows)]);
-        }
-    }
-
-    /**
-     * Counts one read cell element against this reader's budget.
-     */
-    private function spendCell(): void
-    {
-        if (++$this->cellElements > self::$maxCellElements) {
-            throw UnreadableSpreadsheet::because('too_many_cells', replace: ['max' => number_format(self::$maxCellElements)]);
-        }
+        return $this->budget ??= new Budget(
+            maxNodes: self::$maxNodes,
+            maxMarkup: self::$maxMarkupNodes,
+            maxRows: self::$maxRowElements,
+            maxCells: self::$maxCellElements,
+            rowLimit: $this->rowLimit ?? self::$maxRows,
+        );
     }
 
     /**
@@ -479,7 +630,9 @@ final class SpreadsheetReader
     }
 
     /**
-     * The first non-empty rows of a sheet as text, keyed by row number.
+     * The first non-empty rows of a sheet as text, keyed by row number. Each row keeps at
+     * most PREVIEW_COLUMNS columns; rows that come from repeat attributes or have values
+     * past those columns are noted (see flags()), so the header is never looked for there.
      *
      * @return array<int, list<string>>
      */
@@ -488,25 +641,40 @@ final class SpreadsheetReader
         $key = $this->previewKey($sheet);
 
         if (! isset($this->previews[$key])) {
-            $cache = self::cachePath($this->path, 'preview', $key . '|' . $this->csvEncoding . '|' . $this->csvDelimiter);
+            $cache = self::cachePath($this->path, 'preview-r7', $key . '|' . $this->csvEncoding . '|' . $this->csvDelimiter);
             $cached = $cache !== null && is_file($cache) ? json_decode((string) file_get_contents($cache), true) : null;
 
-            if (is_array($cached)) {
+            if (is_array($cached) && is_array($cached['rows'] ?? null) && is_array($cached['flags'] ?? null)) {
                 $this->previews[$key] = [];
+                $this->flags[$key] = [];
 
-                foreach ($cached as $number => $cells) {
+                foreach ($cached['rows'] as $number => $cells) {
                     if (is_array($cells)) {
                         $this->previews[$key][(int) $number] = array_values(array_map(fn (mixed $cell): string => is_scalar($cell) ? (string) $cell : '', $cells));
                     }
                 }
+
+                foreach ($cached['flags'] as $number => $flag) {
+                    $this->flags[$key][(int) $number] = is_scalar($flag) ? (string) $flag : 'wide';
+                }
             } else {
                 $rows = [];
+                $flags = [];
                 $blank = 0;
+                $bytes = 0;
+                $onFlag = function (int $number, string $flag) use (&$flags): void {
+                    // "wide" is the stronger note: such a row can never be the header.
+                    if (($flags[$number] ?? '') !== 'wide' && count($flags) < 10 * self::PREVIEW_ROWS + self::PREVIEW_BLANK_ROWS) {
+                        $flags[$number] = $flag;
+                    }
+                };
 
                 // Rows come without a width (the header is not known yet), so whitespace-only
                 // far cells are never padded; a sheet of such rows ends the preview early.
-                foreach ($this->cells($sheet) as $number => $cells) {
-                    if (implode('', array_map('trim', $cells)) === '') {
+                foreach ($this->scan($sheet, null, null, $onFlag) as $number => $cells) {
+                    // A row whose values all lie past the kept columns is not blank: it is
+                    // shown (empty) and noted, so a header that wide is refused, not skipped.
+                    if (implode('', array_map('trim', $cells)) === '' && ($flags[$number] ?? '') !== 'wide') {
                         if (++$blank > self::PREVIEW_BLANK_ROWS) {
                             break;
                         }
@@ -515,16 +683,18 @@ final class SpreadsheetReader
                     }
 
                     $rows[$number] = $cells;
+                    $bytes += array_sum(array_map('strlen', $cells));
 
-                    if (count($rows) >= self::PREVIEW_ROWS) {
+                    if (count($rows) >= self::PREVIEW_ROWS || $bytes > self::PREVIEW_BYTES) {
                         break;
                     }
                 }
 
                 $this->previews[$key] = $rows;
+                $this->flags[$key] = array_intersect_key($flags, $rows);
 
                 if ($cache !== null) {
-                    @file_put_contents($cache, json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE));
+                    @file_put_contents($cache, json_encode(['rows' => (object) $rows, 'flags' => (object) $this->flags[$key]], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE));
                 }
             }
         }
@@ -533,6 +703,19 @@ final class SpreadsheetReader
         $rows = $this->previews[$key];
 
         return array_slice($rows, 0, $limit, true);
+    }
+
+    /**
+     * Notes on the preview's rows: row number => "repeated" (it comes from a repeat
+     * attribute) or "wide" (it has values past PREVIEW_COLUMNS).
+     *
+     * @return array<int, string>
+     */
+    public function flags(?string $sheet = null): array
+    {
+        $this->preview($sheet);
+
+        return $this->flags[$this->previewKey($sheet)] ?? [];
     }
 
     /**
@@ -548,11 +731,20 @@ final class SpreadsheetReader
             throw UnreadableSpreadsheet::because('empty');
         }
 
-        $headerRow ??= HeaderDetector::detect($preview, $guesses);
-        $headerCells = $preview[$headerRow] ?? $this->rowAt($sheet, (int) $headerRow);
+        $flags = $this->flags($sheet);
+        $headerRow ??= HeaderDetector::detect($preview, $guesses, $flags);
+        $wide = ($flags[$headerRow] ?? '') === 'wide';
+        $headerCells = $preview[$headerRow] ?? $this->rowAt($sheet, (int) $headerRow, $wide);
 
         if ($headerCells === null || Headers::width($headerCells) === 0) {
             throw UnreadableSpreadsheet::because('no_header');
+        }
+
+        // The column budget: the header's real extent, never more than MAX_HEADER_COLUMNS.
+        // Every row is read, padded and stored at this width, so a header as wide as a
+        // sheet (16,384 columns) is refused here instead of multiplying every row.
+        if ($wide || Headers::width($headerCells) > self::MAX_HEADER_COLUMNS) {
+            throw UnreadableSpreadsheet::because('too_many_columns', replace: ['max' => number_format(self::MAX_HEADER_COLUMNS)]);
         }
 
         // Merged header cells show up as blanks between filled cells; without blanks there is nothing to look up.
@@ -579,6 +771,7 @@ final class SpreadsheetReader
             delimiter: $this->csv()?->delimiter,
             maxRows: $this->rowLimit ?? self::$maxRows,
             preview: array_filter($preview, fn (int $number): bool => $number > $first, ARRAY_FILTER_USE_KEY),
+            maxBytes: self::$maxImportBytes,
         );
     }
 
@@ -605,9 +798,10 @@ final class SpreadsheetReader
     }
 
     /**
+     * @param  (Closure(int, string): void)|null  $onFlag
      * @return \Generator<int, list<string>>
      */
-    private function scan(?string $sheet, ?int $width, ?int $only = null): \Generator
+    private function scan(?string $sheet, ?int $width, ?int $only = null, ?Closure $onFlag = null): \Generator
     {
         self::$parses++;
         $scanned = 0;
@@ -620,7 +814,7 @@ final class SpreadsheetReader
         $previous = libxml_use_internal_errors(true);
 
         try {
-            foreach ($this->readCells($sheet, $width, $only, $count) as $number => $cells) {
+            foreach ($this->readCells($sheet, $width, $only, $count, $onFlag) as $number => $cells) {
                 // Empty rows count too: a sheet can claim a row number in the millions.
                 $count();
 
@@ -646,21 +840,20 @@ final class SpreadsheetReader
 
     /**
      * @param  Closure(): void  $countBlank  counts a blank CSV record toward the scanned rows
+     * @param  (Closure(int, string): void)|null  $onFlag
      * @return \Generator<int, list<string>>
      */
-    private function readCells(?string $sheet, ?int $width, ?int $only, Closure $countBlank): \Generator
+    private function readCells(?string $sheet, ?int $width, ?int $only, Closure $countBlank, ?Closure $onFlag = null): \Generator
     {
         $csv = $this->csv();
 
         if ($csv !== null) {
-            $reader = CsvReader::from($csv->path);
-            $reader->setDelimiter($csv->delimiter);
+            $flag = $onFlag === null ? null : fn (int $offset, string $note) => $onFlag($offset + 1, $note);
+
             // Blank lines are counted, never skipped silently: a file of millions of them
             // is refused at the scanned-row cap like any other sheet.
-            $reader->includeEmptyRecords();
-
-            foreach ($reader->getRecords() as $offset => $record) {
-                if ($record === [] || $record === [null]) {
+            foreach ($csv->records($width ?? self::PREVIEW_COLUMNS, $flag) as $offset => $record) {
+                if ($record === []) {
                     $countBlank();
 
                     continue;
@@ -674,18 +867,7 @@ final class SpreadsheetReader
                     continue;
                 }
 
-                // The same column limit as a spreadsheet: a line of a million fields is refused.
-                if (count($record) > XlsxSheets::MAX_COLUMNS) {
-                    throw UnreadableSpreadsheet::because('too_large_sheet');
-                }
-
-                $values = array_values($record);
-
-                if ($width !== null && count($values) > $width) {
-                    $values = array_slice($values, 0, $width);
-                }
-
-                yield $offset + 1 => array_map(fn (mixed $value): string => is_scalar($value) ? (string) $value : '', $values);
+                yield $offset + 1 => $record;
             }
 
             return;
@@ -694,12 +876,12 @@ final class SpreadsheetReader
         $sheet = $this->resolveSheet($sheet);
 
         if ($this->format === 'ods') {
-            yield from (new OdsSheets($this->path, $this->spendCell(...)))->rows((string) $sheet, $width, $this->spendRowElement(...), $only);
+            yield from (new OdsSheets($this->path, $this->budget()))->rows((string) $sheet, $width, $only, $onFlag);
 
             return;
         }
 
-        yield from $this->xlsx()->rows((string) $sheet, $width, $this->spendRowElement(...), $only);
+        yield from $this->xlsx()->rows((string) $sheet, $width, $only, $onFlag);
     }
 
     private function resolveSheet(?string $sheet): ?string
@@ -716,12 +898,17 @@ final class SpreadsheetReader
     }
 
     /**
+     * @param  bool  $wide  set when the row has values past PREVIEW_COLUMNS
      * @return list<string>|null
      */
-    private function rowAt(?string $sheet, int $number): ?array
+    private function rowAt(?string $sheet, int $number, bool &$wide = false): ?array
     {
+        $onFlag = function (int $row, string $flag) use ($number, &$wide): void {
+            $wide = $wide || ($row === $number && $flag === 'wide');
+        };
+
         // Only that row is read: the rows above it are skipped unread, never padded.
-        foreach ($this->scan($sheet, null, $number) as $index => $cells) {
+        foreach ($this->scan($sheet, null, $number, $onFlag) as $index => $cells) {
             if ($index === $number) {
                 return $cells;
             }
@@ -765,7 +952,7 @@ final class SpreadsheetReader
         try {
             return match ($this->format) {
                 'xlsx' => $this->xlsxMerges($sheet, $headerRow),
-                'ods' => (new OdsSheets($this->path, $this->spendCell(...)))->merges((string) $sheet, $headerRow, $this->spendRowElement(...)),
+                'ods' => (new OdsSheets($this->path, $this->budget()))->merges((string) $sheet, $headerRow),
                 default => [],
             };
         } catch (Throwable) {
@@ -804,6 +991,6 @@ final class SpreadsheetReader
 
     private function xlsx(): XlsxSheets
     {
-        return $this->xlsxSheets ??= new XlsxSheets($this->path, $this->spendCell(...));
+        return $this->xlsxSheets ??= new XlsxSheets($this->path, $this->budget());
     }
 }

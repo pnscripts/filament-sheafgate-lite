@@ -7,10 +7,17 @@ use PNScripts\SheafgateLite\Exceptions\UnreadableSpreadsheet;
 /**
  * A CSV or TSV file converted to UTF-8, with its original encoding and delimiter detected.
  *
- * Encodings: a byte order mark wins (UTF-8, UTF-16 LE/BE); UTF-16 without a mark is
+ * Encodings: a byte order mark wins (UTF-8, UTF-16 LE/BE, UTF-32 LE/BE); UTF-16 without a mark is
  * recognised by its zero bytes; valid UTF-8 stays UTF-8; anything else is single-byte
  * Windows text, told apart as Windows-1251 (Cyrillic) or Windows-1252 (Western) by how
- * many letters use the upper half of the code page.
+ * many letters use the upper half of the code page. A NUL byte left after conversion
+ * means the encoding was not understood, and the file is refused.
+ *
+ * Records are read by a small parser of its own (RFC 4180 quoting) in 64 KB chunks: a
+ * field is refused once it passes the most a cell can hold, a record once it has more
+ * fields than a sheet has columns, so no line, however long, is ever held whole. A line
+ * break is CRLF, LF or a lone CR, the same everywhere in the file; inside quotes it is
+ * part of the value.
  */
 final class CsvSource
 {
@@ -66,6 +73,14 @@ final class CsvSource
             return ['UTF-8', 3];
         }
 
+        if (str_starts_with($sample, "\xFF\xFE\x00\x00")) {
+            return ['UTF-32LE', 4];
+        }
+
+        if (str_starts_with($sample, "\x00\x00\xFE\xFF")) {
+            return ['UTF-32BE', 4];
+        }
+
         if (str_starts_with($sample, "\xFF\xFE")) {
             return ['UTF-16LE', 2];
         }
@@ -118,16 +133,15 @@ final class CsvSource
         return [($high > 0 && $high / max(1, $high + $asciiLetters) > 0.4) ? 'Windows-1251' : 'Windows-1252', 0];
     }
 
+    /**
+     * Guesses the delimiter from the first 64 KB (at most 25 non-blank records): the one
+     * that splits the most records into the same number of fields.
+     */
     public static function detectDelimiter(string $utf8Path): string
     {
-        $handle = fopen($utf8Path, 'rb');
-        $lines = [];
-
-        while ($handle !== false && count($lines) < 25 && ($line = fgets($handle)) !== false) {
-            if (trim($line) !== '') {
-                $lines[] = rtrim($line, "\r\n");
-            }
-        }
+        $handle = @fopen($utf8Path, 'rb');
+        $sample = $handle === false ? '' : (string) fread($handle, self::SAMPLE_BYTES);
+        $complete = $handle === false || feof($handle) || fread($handle, 1) === '';
 
         if ($handle !== false) {
             fclose($handle);
@@ -137,14 +151,31 @@ final class CsvSource
         $bestScore = 0;
 
         foreach (self::DELIMITERS as $delimiter) {
-            $counts = array_map(fn (string $line): int => count(str_getcsv($line, $delimiter, '"', '')), $lines);
-            $counts = array_filter($counts, fn (int $count): bool => $count > 1);
+            $counts = [];
+
+            try {
+                foreach (self::parse(self::chunks($sample), $delimiter, PHP_INT_MAX, null, $complete) as $record) {
+                    if ($record === []) {
+                        continue;
+                    }
+
+                    if (count($record) > 1) {
+                        $counts[] = count($record);
+                    }
+
+                    if (count($counts) >= 25) {
+                        break;
+                    }
+                }
+            } catch (UnreadableSpreadsheet) {
+                // A sample that is not a table with this delimiter: it scores nothing.
+            }
 
             if ($counts === []) {
                 continue;
             }
 
-            // The most common field count, weighted by how many lines agree on it.
+            // The most common field count, weighted by how many records agree on it.
             $frequencies = array_count_values($counts);
             arsort($frequencies);
             $fields = (int) array_key_first($frequencies);
@@ -159,12 +190,267 @@ final class CsvSource
         return $best;
     }
 
+    /**
+     * The records of the file, keyed by their 0-based position (blank lines included, as
+     * empty lists). Only the first $keep fields of a record are kept; $onFlag hears "wide"
+     * for a record with a value past them.
+     *
+     * @param  (\Closure(int, string): void)|null  $onFlag
+     * @return \Generator<int, list<string>>
+     */
+    public function records(?int $keep = null, ?\Closure $onFlag = null): \Generator
+    {
+        $handle = @fopen($this->path, 'rb');
+
+        if ($handle === false) {
+            throw UnreadableSpreadsheet::because('unreadable');
+        }
+
+        try {
+            yield from self::parse(self::fileChunks($handle), $this->delimiter, $keep ?? PHP_INT_MAX, $onFlag);
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    /**
+     * @param  resource  $handle
+     * @return \Generator<int, string>
+     */
+    private static function fileChunks($handle): \Generator
+    {
+        while (! feof($handle)) {
+            $chunk = fread($handle, self::SAMPLE_BYTES);
+
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+
+            // A NUL byte is never text: the encoding was not understood (UTF-32 without a
+            // mark, a binary file), and reading on would put NULs into names and values.
+            if (str_contains($chunk, "\0")) {
+                throw UnreadableSpreadsheet::because('encoding');
+            }
+
+            yield $chunk;
+        }
+    }
+
+    /**
+     * @return \Generator<int, string>
+     */
+    private static function chunks(string $text): \Generator
+    {
+        if (str_contains($text, "\0")) {
+            throw UnreadableSpreadsheet::because('encoding');
+        }
+
+        if ($text !== '') {
+            yield $text;
+        }
+    }
+
+    /**
+     * The parser: RFC 4180 fields (a quoted field may hold delimiters, quotes doubled and
+     * line breaks), lenient about stray quotes inside an unquoted field. A line break
+     * outside quotes is CRLF, LF or a lone CR. With $complete false (a sample cut short),
+     * the last, possibly cut, record is left out.
+     *
+     * @param  iterable<int, string>  $chunks
+     * @param  (\Closure(int, string): void)|null  $onFlag
+     * @return \Generator<int, list<string>>
+     */
+    private static function parse(iterable $chunks, string $delimiter, int $keep, ?\Closure $onFlag = null, bool $complete = true): \Generator
+    {
+        $delimiter = $delimiter === '' ? ',' : $delimiter[0];
+        $stops = $delimiter . "\"\r\n";
+        $maxField = 4 * SpreadsheetReader::MAX_CELL_LENGTH;
+        $index = 0;
+        $fields = [];
+        $count = 0;
+        $bytes = 0;
+        $wide = false;
+        $field = '';
+        $atStart = true;
+        $quoted = false;
+        $inQuotes = false;
+        $pendingCr = false;
+        $pendingQuote = false;
+        $any = false;
+
+        foreach ($chunks as $buffer) {
+            $length = strlen($buffer);
+            $pos = 0;
+
+            while ($pos < $length) {
+                // A CR at the end of the last chunk: a following LF belongs to the same break.
+                if ($pendingCr) {
+                    $pendingCr = false;
+
+                    if ($buffer[$pos] === "\n") {
+                        $pos++;
+
+                        continue;
+                    }
+                }
+
+                // A quote at the end of the last chunk, inside quotes: doubled, or the closing one.
+                if ($pendingQuote) {
+                    $pendingQuote = false;
+
+                    if ($buffer[$pos] === '"') {
+                        $field .= '"';
+                        $pos++;
+
+                        continue;
+                    }
+
+                    $inQuotes = false;
+                }
+
+                if ($inQuotes) {
+                    $quote = strpos($buffer, '"', $pos);
+                    $piece = $quote === false ? substr($buffer, $pos) : substr($buffer, $pos, $quote - $pos);
+
+                    if (strlen($field) + strlen($piece) > $maxField) {
+                        throw UnreadableSpreadsheet::because('cell_too_long', replace: ['max' => number_format(SpreadsheetReader::MAX_CELL_LENGTH)]);
+                    }
+
+                    $field .= $piece;
+
+                    if ($quote === false) {
+                        $pos = $length;
+
+                        continue;
+                    }
+
+                    $pos = $quote + 1;
+
+                    if ($pos >= $length) {
+                        $pendingQuote = true;
+
+                        continue;
+                    }
+
+                    if ($buffer[$pos] === '"') {
+                        $field .= '"';
+                        $pos++;
+                    } else {
+                        $inQuotes = false;
+                    }
+
+                    continue;
+                }
+
+                $span = strcspn($buffer, $stops, $pos);
+
+                if ($span > 0) {
+                    if (strlen($field) + $span > $maxField) {
+                        throw UnreadableSpreadsheet::because('cell_too_long', replace: ['max' => number_format(SpreadsheetReader::MAX_CELL_LENGTH)]);
+                    }
+
+                    $field .= substr($buffer, $pos, $span);
+                    $pos += $span;
+                    $atStart = false;
+                    $any = true;
+
+                    continue;
+                }
+
+                $char = $buffer[$pos++];
+                $any = true;
+
+                if ($char === '"') {
+                    if ($atStart) {
+                        $inQuotes = true;
+                        $quoted = true;
+                        $atStart = false;
+                    } else {
+                        $field .= '"';
+                    }
+
+                    continue;
+                }
+
+                // The end of a field: kept, or past the kept columns only looked at.
+                if (++$count > XlsxSheets::MAX_COLUMNS) {
+                    throw UnreadableSpreadsheet::because('too_large_sheet');
+                }
+
+                if ($count <= $keep) {
+                    $bytes += strlen($field);
+
+                    if ($bytes > SpreadsheetReader::MAX_ROW_BYTES) {
+                        throw UnreadableSpreadsheet::because('row_too_large', replace: ['max' => (int) (SpreadsheetReader::MAX_ROW_BYTES / 1024 / 1024)]);
+                    }
+
+                    $fields[] = $field;
+                } elseif (! $wide && trim($field) !== '') {
+                    $wide = true;
+                }
+
+                $field = '';
+                $atStart = true;
+
+                if ($char === $delimiter) {
+                    continue;
+                }
+
+                // A line break: the record ends (a lone field-less line is a blank record).
+                if ($count === 1 && ! $quoted && $fields === [''] ) {
+                    $fields = [];
+                }
+
+                if ($wide && $onFlag !== null) {
+                    $onFlag($index, 'wide');
+                }
+
+                yield $index++ => $fields;
+                $fields = [];
+                $count = 0;
+                $bytes = 0;
+                $wide = false;
+                $quoted = false;
+                $any = false;
+
+                if ($char === "\r") {
+                    if ($pos >= $length) {
+                        $pendingCr = true;
+                    } elseif ($buffer[$pos] === "\n") {
+                        $pos++;
+                    }
+                }
+            }
+        }
+
+        // The last record, when the file does not end with a line break.
+        if ($complete && ($any || $inQuotes || $pendingQuote)) {
+            if (++$count > XlsxSheets::MAX_COLUMNS) {
+                throw UnreadableSpreadsheet::because('too_large_sheet');
+            }
+
+            if ($count <= $keep) {
+                $fields[] = $field;
+            } elseif (trim($field) !== '') {
+                $wide = true;
+            }
+
+            if ($wide && $onFlag !== null) {
+                $onFlag($index, 'wide');
+            }
+
+            yield $index => $fields;
+        }
+    }
+
     public static function canonicalEncoding(string $encoding): string
     {
         return match (strtolower(str_replace(['_', ' '], '-', $encoding))) {
             'utf8', 'utf-8' => 'UTF-8',
             'utf-16', 'utf-16le', 'utf16le' => 'UTF-16LE',
             'utf-16be', 'utf16be' => 'UTF-16BE',
+            'utf-32', 'utf-32le', 'utf32le' => 'UTF-32LE',
+            'utf-32be', 'utf32be' => 'UTF-32BE',
             'windows-1251', 'cp1251' => 'Windows-1251',
             'windows-1252', 'cp1252' => 'Windows-1252',
             'iso-8859-1', 'latin1', 'latin-1' => 'ISO-8859-1',

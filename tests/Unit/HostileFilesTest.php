@@ -21,8 +21,16 @@ it('counts the bytes really unpacked, not the sizes the archive states', functio
 });
 
 it('refuses shared strings that unpack far beyond their packed size', function () {
-    $strings = str_repeat('<si><t>' . str_repeat('x', 100) . '</t></si>', 200000);
-    $path = lyingZip(xlsxWithSheet(HEADER_ROW, $strings), 'xl/sharedStrings.xml');
+    $strings = (function () {
+        yield '<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
+
+        for ($i = 0; $i < 20; $i++) {
+            yield str_repeat('<si><t>' . str_repeat('x', 100) . '</t></si>', 10000);
+        }
+
+        yield '</sst>';
+    })();
+    $path = lieAboutSize(zipWithLargePart(xlsxWithSheet(HEADER_ROW, ''), 'xl/sharedStrings.xml', $strings), 'xl/sharedStrings.xml');
 
     SpreadsheetReader::open($path, 'sst.xlsx')->sheets();
 })->throws(UnreadableSpreadsheet::class, 'too large');

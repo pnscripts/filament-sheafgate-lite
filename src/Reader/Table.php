@@ -26,6 +26,7 @@ final class Table
         public readonly ?string $delimiter = null,
         public readonly ?int $maxRows = null,
         private readonly array $preview = [],
+        public readonly ?int $maxBytes = null,
     ) {}
 
     /**
@@ -42,6 +43,11 @@ final class Table
         }
 
         $count = 0;
+        $bytes = 0;
+
+        // What a stored row costs besides its values: every header name and some framing per
+        // column, the padding of a short row included.
+        $perRow = array_sum(array_map('strlen', $this->headers)) + 6 * $width;
 
         foreach (($this->cells)() as $number => $cells) {
             // Every row the file holds counts, also one whose values all lie outside the
@@ -58,6 +64,13 @@ final class Table
 
             if (implode('', array_map('trim', $cells)) === '') {
                 continue;
+            }
+
+            // The stored-bytes budget of one import, counted before the row is handed on.
+            $bytes += $perRow + array_sum(array_map('strlen', $cells));
+
+            if ($this->maxBytes !== null && $bytes > $this->maxBytes) {
+                throw UnreadableSpreadsheet::because('too_much_data', replace: ['size' => (int) round($this->maxBytes / 1024 / 1024)]);
             }
 
             yield $number => array_combine($this->headers, $cells);

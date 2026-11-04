@@ -1,6 +1,6 @@
 # Sheafgate Lite: directory listings
 
-Status 2026-11-03: built and tested (139 Pest tests, PHPStan max), buyer check from the release archive passed (see the build notes for versions). Not submitted anywhere. Planned public repository https://github.com/pnscripts/filament-sheafgate-lite with tag v1.0.0; the coordinator creates it.
+Status 2026-11-03: built and tested (161 Pest tests at memory_limit 128M after security review round 7, PHPStan max), buyer check from the release archive passed (see the build notes for versions). Not submitted anywhere. Planned public repository https://github.com/pnscripts/filament-sheafgate-lite with tag v1.0.0; the coordinator creates it.
 
 ## Packagist (owner step: sign-in)
 

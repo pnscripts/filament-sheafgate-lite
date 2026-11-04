@@ -46,6 +46,10 @@ return [
         'error_cell' => 'Cell :cell (column “:column”) shows the error :error. Fix it in the spreadsheet and upload the file again.',
         'cell_too_long' => 'A cell holds more than :max characters, the most a spreadsheet cell can hold. The file looks damaged; save it again from Excel or LibreOffice.',
         'too_large_sheet' => 'The sheet uses cells beyond the last column (XFD) or row (1,048,576) a spreadsheet can have. The file looks damaged; save it again from Excel or LibreOffice.',
+        'too_many_columns' => 'The header row has more than :max columns. Remove the empty or extra columns, or split the sheet, and upload it again.',
+        'too_much_data' => 'The sheet holds more than :size MB of data to import. Split it into smaller files.',
+        'row_too_large' => 'A row holds more than :max MB of text. The file looks damaged; save it again from Excel or LibreOffice.',
+        'too_complex' => 'The file holds far more XML markup than its cells need (comments, processing instructions or nested elements). Save it again from Excel or LibreOffice and upload it again.',
         'failed_title' => 'The file could not be imported',
     ],
 

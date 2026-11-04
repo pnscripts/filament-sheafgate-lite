@@ -104,14 +104,21 @@ it('reads a merged header in an ODS file read cell by cell', function () {
 });
 
 it('reads only the shared strings the rows ask for', function () {
-    $strings = '';
+    $path = zipWithLargePart(xlsxWithSheet(WIDTH_HEADER . '<row r="2"><c r="A2" t="s"><v>0</v></c><c r="B2" t="s"><v>1</v></c></row>', ''), 'xl/sharedStrings.xml', (function () {
+        yield '<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
 
-    for ($i = 0; $i < 1900000; $i++) {
-        $strings .= "<si><t>string number {$i}</t></si>";
-    }
+        for ($i = 0; $i < 1900000; $i += 10000) {
+            $piece = '';
 
-    $path = zipWith(xlsxWithSheet(WIDTH_HEADER . '<row r="2"><c r="A2" t="s"><v>0</v></c><c r="B2" t="s"><v>1</v></c></row>', $strings));
-    unset($strings);
+            for ($j = $i; $j < $i + 10000; $j++) {
+                $piece .= "<si><t>string number {$j}</t></si>";
+            }
+
+            yield $piece;
+        }
+
+        yield '</sst>';
+    })());
 
     // Reading all 1.9 million strings needs far more memory than this.
     [$code, $output] = readInChildProcess($path, '32M');
@@ -121,14 +128,21 @@ it('reads only the shared strings the rows ask for', function () {
 });
 
 it('refuses more than 2,000,000 shared strings', function () {
-    $strings = '';
+    $path = zipWithLargePart(xlsxWithSheet(WIDTH_HEADER . '<row r="2"><c r="A2" t="s"><v>2000000</v></c><c r="B2" t="s"><v>1</v></c></row>', ''), 'xl/sharedStrings.xml', (function () {
+        yield '<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
 
-    for ($i = 0; $i <= 2000000; $i++) {
-        $strings .= "<si><t>{$i}</t></si>";
-    }
+        for ($i = 0; $i <= 2000000; $i += 10000) {
+            $piece = '';
 
-    $path = zipWith(xlsxWithSheet(WIDTH_HEADER . '<row r="2"><c r="A2" t="s"><v>2000000</v></c><c r="B2" t="s"><v>1</v></c></row>', $strings));
-    unset($strings);
+            for ($j = $i; $j < min($i + 10000, 2000001); $j++) {
+                $piece .= "<si><t>{$j}</t></si>";
+            }
+
+            yield $piece;
+        }
+
+        yield '</sst>';
+    })());
 
     // The archive passes the size check: the strings themselves are refused.
     $reader = SpreadsheetReader::open($path, 'strings.xlsx');
