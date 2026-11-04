@@ -6,8 +6,16 @@ use PNScripts\SheafgateLite\Reader\SpreadsheetReader;
 const HEADER_ROW = '<row r="1"><c r="A1" t="inlineStr"><is><t>SKU</t></is></c><c r="B1" t="inlineStr"><is><t>Name</t></is></c></row>';
 
 it('counts the bytes really unpacked, not the sizes the archive states', function () {
-    $rows = HEADER_ROW . str_repeat('<row/>', 2000000);
-    $path = lyingZip(xlsxWithSheet($rows), 'xl/worksheets/sheet1.xml');
+    $sheet = (function () {
+        yield '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' . HEADER_ROW;
+
+        for ($i = 0; $i < 20; $i++) {
+            yield str_repeat('<row/>', 100000);
+        }
+
+        yield '</sheetData></worksheet>';
+    })();
+    $path = lieAboutSize(zipWithLargePart(xlsxWithSheet(''), 'xl/worksheets/sheet1.xml', $sheet), 'xl/worksheets/sheet1.xml');
 
     $started = microtime(true);
 

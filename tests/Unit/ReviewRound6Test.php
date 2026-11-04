@@ -101,17 +101,25 @@ it('reads a chosen header row without padding the rows above it', function () {
 
 it('measures every part of the archive, whatever its name', function (string $part) {
     $entries = xlsxWithSheet(R6_HEADER);
-    $bomb = r6Sheet(str_repeat('<row r="2"><c/></row>', 600000));
+    $bomb = (function () {
+        yield '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>';
+
+        for ($i = 0; $i < 6; $i++) {
+            yield str_repeat('<row r="2"><c/></row>', 100000);
+        }
+
+        yield '</sheetData></worksheet>';
+    })();
 
     if ($part === 'sheet') {
         $entries['xl/_rels/workbook.xml.rels'] = str_replace('worksheets/sheet1.xml', 'worksheets/sheet1.bin', $entries['xl/_rels/workbook.xml.rels']);
-        $entries['xl/worksheets/sheet1.bin'] = $bomb;
+        $name = 'xl/worksheets/sheet1.bin';
     } else {
         $entries['xl/_rels/workbook.xml.rels'] = str_replace('</Relationships>', '<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.dat"/></Relationships>', $entries['xl/_rels/workbook.xml.rels']);
-        $entries['xl/styles.dat'] = $bomb;
+        $name = 'xl/styles.dat';
     }
 
-    SpreadsheetReader::open(zipWith($entries), 'bomb.xlsx');
+    SpreadsheetReader::open(zipWithLargePart($entries, $name, $bomb), 'bomb.xlsx');
 })->with(['sheet', 'styles'])->throws(UnreadableSpreadsheet::class, 'too large');
 
 // 3. LIBXML_PARSEHUGE lifted libxml's depth limit, and deep nesting inside a cell crashed PHP.

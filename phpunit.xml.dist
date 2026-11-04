@@ -6,8 +6,9 @@
          cacheDirectory=".phpunit.cache">
     <testsuites>
         <testsuite name="Sheafgate Lite">
-            <directory>tests/Feature</directory>
+            <!-- Unit first: its hostile-file fixtures need the headroom of a fresh process at 128M. -->
             <directory>tests/Unit</directory>
+            <directory>tests/Feature</directory>
         </testsuite>
     </testsuites>
     <php>
