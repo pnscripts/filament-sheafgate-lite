@@ -412,14 +412,16 @@ final class SpreadsheetReader
         $hasBlanks = in_array('', array_map('trim', array_slice($headerCells, 0, $width)), true);
         $headers = Headers::normalize($headerCells, $hasBlanks ? $this->cachedHeaderMerges($sheet, (int) $headerRow) : []);
         $first = (int) $headerRow;
+        $width = count($headers);
 
         return new Table(
             format: $this->format,
             sheet: $sheet,
             headerRow: $first,
             headers: $headers,
-            cells: function () use ($sheet, $first): \Generator {
-                foreach ($this->cells($sheet) as $number => $cells) {
+            cells: function () use ($sheet, $first, $width): \Generator {
+                // Only the header's columns are kept: cells past them are never padded or stored.
+                foreach ($this->cells($sheet, $width) as $number => $cells) {
                     if ($number > $first) {
                         yield $number => $cells;
                     }
@@ -444,10 +446,12 @@ final class SpreadsheetReader
 
     /**
      * All rows of a sheet as text, keyed by 1-based row number (empty rows may be left out).
+     * With a width, only the first $width columns of each row are kept; a row whose values
+     * all lie past them comes as an empty list, so it still counts as a row.
      *
      * @return \Generator<int, list<string>>
      */
-    public function cells(?string $sheet = null): \Generator
+    public function cells(?string $sheet = null, ?int $width = null): \Generator
     {
         self::$parses++;
         $scanned = 0;
@@ -455,7 +459,7 @@ final class SpreadsheetReader
         $previous = libxml_use_internal_errors(true);
 
         try {
-            foreach ($this->readCells($sheet) as $number => $cells) {
+            foreach ($this->readCells($sheet, $width) as $number => $cells) {
                 // Empty rows count too: a sheet can claim a row number in the millions.
                 if (++$scanned > $maxScanned) {
                     throw UnreadableSpreadsheet::because('too_many_rows', replace: ['max' => number_format($this->rowLimit ?? self::$maxRows)]);
@@ -483,7 +487,7 @@ final class SpreadsheetReader
     /**
      * @return \Generator<int, list<string>>
      */
-    private function readCells(?string $sheet): \Generator
+    private function readCells(?string $sheet, ?int $width): \Generator
     {
         $csv = $this->csv();
 
@@ -492,7 +496,18 @@ final class SpreadsheetReader
             $reader->setDelimiter($csv->delimiter);
 
             foreach ($reader->getRecords() as $offset => $record) {
-                yield $offset + 1 => array_map(fn (mixed $value): string => is_scalar($value) ? (string) $value : '', array_values($record));
+                // The same column limit as a spreadsheet: a line of a million fields is refused.
+                if (count($record) > XlsxSheets::MAX_COLUMNS) {
+                    throw UnreadableSpreadsheet::because('too_large_sheet');
+                }
+
+                $values = array_values($record);
+
+                if ($width !== null && count($values) > $width) {
+                    $values = array_slice($values, 0, $width);
+                }
+
+                yield $offset + 1 => array_map(fn (mixed $value): string => is_scalar($value) ? (string) $value : '', $values);
             }
 
             return;
@@ -501,12 +516,12 @@ final class SpreadsheetReader
         $sheet = $this->resolveSheet($sheet);
 
         if ($this->format === 'ods') {
-            yield from (new OdsSheets($this->path))->rows((string) $sheet);
+            yield from (new OdsSheets($this->path))->rows((string) $sheet, $width);
 
             return;
         }
 
-        yield from $this->xlsx()->rows((string) $sheet);
+        yield from $this->xlsx()->rows((string) $sheet, $width);
     }
 
     private function resolveSheet(?string $sheet): ?string

@@ -44,15 +44,20 @@ final class Table
         $count = 0;
 
         foreach (($this->cells)() as $number => $cells) {
+            // Every row the file holds counts, also one whose values all lie outside the
+            // header's columns: a sheet of millions of such rows is never read to the end.
+            if ($this->maxRows !== null && ++$count > $this->maxRows) {
+                if (! $limited) {
+                    return;
+                }
+
+                throw UnreadableSpreadsheet::because('too_many_rows', replace: ['max' => number_format($this->maxRows)]);
+            }
+
             $cells = array_slice(array_pad($cells, $width, ''), 0, $width);
 
             if (implode('', array_map('trim', $cells)) === '') {
                 continue;
-            }
-
-            // Stop while streaming: a sheet of millions of rows is never read to the end.
-            if ($limited && $this->maxRows !== null && ++$count > $this->maxRows) {
-                throw UnreadableSpreadsheet::because('too_many_rows', replace: ['max' => number_format($this->maxRows)]);
             }
 
             yield $number => array_combine($this->headers, $cells);

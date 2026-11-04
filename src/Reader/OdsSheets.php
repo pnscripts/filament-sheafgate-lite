@@ -58,24 +58,35 @@ final class OdsSheets
     /**
      * Rows of one sheet as text, keyed by 1-based row number; empty rows are left out.
      *
+     * Rows are read cell by cell, never built whole: a row may hold at most
+     * XlsxSheets::MAX_COLUMNS cell elements, and with a width only the first $width
+     * columns are kept (a row whose only values lie past it is yielded as an empty list,
+     * so it still counts as a row).
+     *
      * @return \Generator<int, list<string>>
      */
-    public function rows(string $sheet): \Generator
+    public function rows(string $sheet, ?int $width = null): \Generator
     {
-        foreach ($this->rowElements($sheet) as $first => [$row, $repeat]) {
-            $cells = $this->cells($row);
+        $xml = $this->open();
 
-            if ($cells === []) {
-                continue;
-            }
+        try {
+            foreach ($this->rowStarts($xml, $sheet) as $first => $repeat) {
+                [$cells, $filled] = $this->streamRow($xml, $width);
 
-            if ($first > XlsxSheets::MAX_ROWS) {
-                throw UnreadableSpreadsheet::because('too_large_sheet');
-            }
+                if (! $filled) {
+                    continue;
+                }
 
-            for ($i = 0; $i < min($repeat, self::MAX_REPEATED_ROWS); $i++) {
-                yield $first + $i => $cells;
+                if ($first > XlsxSheets::MAX_ROWS) {
+                    throw UnreadableSpreadsheet::because('too_large_sheet');
+                }
+
+                for ($i = 0; $i < min($repeat, self::MAX_REPEATED_ROWS); $i++) {
+                    yield $first + $i => $cells;
+                }
             }
+        } finally {
+            $xml->close();
         }
     }
 
@@ -86,139 +97,219 @@ final class OdsSheets
      */
     public function merges(string $sheet, int $rowNumber): array
     {
-        foreach ($this->rowElements($sheet) as $first => [$row, $repeat]) {
-            if ($first + $repeat - 1 < $rowNumber) {
-                continue;
-            }
+        $xml = $this->open();
 
-            if ($first > $rowNumber) {
-                break;
-            }
+        try {
+            foreach ($this->rowStarts($xml, $sheet) as $first => $repeat) {
+                if ($first > $rowNumber) {
+                    break;
+                }
 
-            $merges = [];
-            $column = 0;
-
-            foreach ($row->childNodes as $cell) {
-                if (! $cell instanceof DOMElement || $cell->namespaceURI !== self::TABLE || ! in_array($cell->localName, ['table-cell', 'covered-table-cell'], true)) {
+                if ($first + $repeat - 1 < $rowNumber) {
                     continue;
                 }
 
-                $span = (int) ($cell->getAttributeNS(self::TABLE, 'number-columns-spanned') ?: 1);
+                $merges = [];
+                $column = 0;
+                $count = 0;
+                $depth = $xml->depth;
+                $moved = $xml->read();
 
-                if ($cell->localName === 'table-cell' && $span > 1) {
-                    $merges[] = [$column, $column + $span - 1];
+                while ($moved && ! ($xml->nodeType === XMLReader::END_ELEMENT && $xml->depth === $depth)) {
+                    if ($xml->nodeType !== XMLReader::ELEMENT) {
+                        $moved = $xml->read();
+
+                        continue;
+                    }
+
+                    if ($this->isCell($xml)) {
+                        if (++$count > XlsxSheets::MAX_COLUMNS) {
+                            throw UnreadableSpreadsheet::because('too_large_sheet');
+                        }
+
+                        $span = (int) ($xml->getAttributeNs('number-columns-spanned', self::TABLE) ?: 1);
+
+                        if ($xml->localName === 'table-cell' && $span > 1) {
+                            $merges[] = [$column, $column + $span - 1];
+                        }
+
+                        $column += max(1, (int) ($xml->getAttributeNs('number-columns-repeated', self::TABLE) ?: 1));
+                    }
+
+                    $moved = $xml->next();
                 }
 
-                $column += max(1, (int) ($cell->getAttributeNS(self::TABLE, 'number-columns-repeated') ?: 1));
+                return $merges;
             }
-
-            return $merges;
+        } finally {
+            $xml->close();
         }
 
         return [];
     }
 
     /**
-     * Row elements of one sheet keyed by the number of their first row, with their repeat count.
+     * Walks to the row elements of one sheet and yields each one's first row number and
+     * repeat count while the reader stands on it. The consumer reads the row's content
+     * (or not); the walk continues after the row either way.
      *
-     * @return \Generator<int, array{0: DOMElement, 1: int}>
+     * @return \Generator<int, int>
      */
-    private function rowElements(string $sheet): \Generator
+    private function rowStarts(XMLReader $xml, string $sheet): \Generator
     {
-        $xml = $this->open();
         $inSheet = false;
         $depth = 0;
         $number = 1;
+        $moved = $xml->read();
 
-        try {
-            $moved = $xml->read();
+        while ($moved) {
+            if ($xml->nodeType === XMLReader::END_ELEMENT && $inSheet && $xml->depth === $depth && $this->is($xml, self::TABLE, 'table')) {
+                break;
+            }
 
-            while ($moved) {
-                if ($xml->nodeType === XMLReader::END_ELEMENT && $inSheet && $xml->depth === $depth && $this->is($xml, self::TABLE, 'table')) {
-                    break;
-                }
+            if ($xml->nodeType !== XMLReader::ELEMENT) {
+                $moved = $xml->read();
 
-                if ($xml->nodeType !== XMLReader::ELEMENT) {
+                continue;
+            }
+
+            if (! $inSheet && $this->is($xml, self::TABLE, 'table')) {
+                if ($xml->getAttributeNs('name', self::TABLE) === $sheet) {
+                    $inSheet = true;
+                    $depth = $xml->depth;
                     $moved = $xml->read();
-
-                    continue;
+                } else {
+                    $moved = $xml->next();
                 }
 
-                if (! $inSheet && $this->is($xml, self::TABLE, 'table')) {
-                    if ($xml->getAttributeNs('name', self::TABLE) === $sheet) {
-                        $inSheet = true;
-                        $depth = $xml->depth;
-                        $moved = $xml->read();
-                    } else {
-                        $moved = $xml->next();
-                    }
+                continue;
+            }
 
-                    continue;
-                }
+            if (! $inSheet || ! $this->is($xml, self::TABLE, 'table-row')) {
+                $moved = $xml->read();
 
-                if (! $inSheet || ! $this->is($xml, self::TABLE, 'table-row')) {
-                    $moved = $xml->read();
+                continue;
+            }
 
-                    continue;
-                }
+            $repeat = max(1, (int) ($xml->getAttributeNs('number-rows-repeated', self::TABLE) ?? 1));
+            $rowDepth = $xml->depth;
+            $empty = $xml->isEmptyElement;
 
-                $repeat = max(1, (int) ($xml->getAttributeNs('number-rows-repeated', self::TABLE) ?? 1));
-                $node = $xml->expand();
+            if (! $empty) {
+                yield $number => $repeat;
+            }
+
+            $number += $repeat;
+
+            // Continue after the row: skipped whole when the consumer did not read it, or
+            // from its end tag when it did.
+            if ($empty || $this->standsOnStart($xml, $rowDepth)) {
                 $moved = $xml->next();
 
-                if ($node instanceof DOMElement) {
-                    yield $number => [$node, $repeat];
-                }
-
-                $number += $repeat;
+                continue;
             }
-        } finally {
-            $xml->close();
+
+            while (! ($xml->nodeType === XMLReader::END_ELEMENT && $xml->depth === $rowDepth)) {
+                if (! $xml->read()) {
+                    return;
+                }
+            }
+
+            $moved = $xml->read();
         }
     }
 
     /**
-     * @return list<string>
+     * Whether the reader still stands on the start tag of the element at that depth.
      */
-    private function cells(DOMElement $row): array
+    private function standsOnStart(XMLReader $xml, int $depth): bool
     {
+        return $xml->nodeType === XMLReader::ELEMENT && $xml->depth === $depth;
+    }
+
+    private function isCell(XMLReader $xml): bool
+    {
+        return $xml->namespaceURI === self::TABLE && ($xml->localName === 'table-cell' || $xml->localName === 'covered-table-cell');
+    }
+
+    /**
+     * Reads the cells of the row the reader stands on and leaves it on the row's end tag.
+     *
+     * @return array{0: list<string>, 1: bool} the kept cells, and whether the row has any value
+     */
+    private function streamRow(XMLReader $xml, ?int $width): array
+    {
+        $depth = $xml->depth;
         $cells = [];
-        $pendingEmpty = 0;
+        $filled = false;
+        $count = 0;
+        $column = 0;
+        $moved = $xml->read();
 
-        foreach ($row->childNodes as $cell) {
-            if (! $cell instanceof DOMElement || $cell->namespaceURI !== self::TABLE || ! in_array($cell->localName, ['table-cell', 'covered-table-cell'], true)) {
-                continue;
-            }
-
-            $repeat = max(1, (int) ($cell->getAttributeNS(self::TABLE, 'number-columns-repeated') ?: 1));
-            $value = $cell->localName === 'covered-table-cell' ? '' : $this->value($cell);
-
-            if ($value === '') {
-                $pendingEmpty += $repeat;
+        while ($moved && ! ($xml->nodeType === XMLReader::END_ELEMENT && $xml->depth === $depth)) {
+            if ($xml->nodeType !== XMLReader::ELEMENT) {
+                $moved = $xml->read();
 
                 continue;
             }
 
-            if (count($cells) + $pendingEmpty + 1 > XlsxSheets::MAX_COLUMNS) {
+            if (! $this->isCell($xml)) {
+                $moved = $xml->next();
+
+                continue;
+            }
+
+            // A row can never hold more cell elements than a sheet has columns.
+            if (++$count > XlsxSheets::MAX_COLUMNS) {
                 throw UnreadableSpreadsheet::because('too_large_sheet');
             }
 
-            for ($i = 0; $i < $pendingEmpty; $i++) {
+            $repeat = max(1, (int) ($xml->getAttributeNs('number-columns-repeated', self::TABLE) ?: 1));
+            $first = $column;
+            $column += $repeat;
+            $outside = $width !== null && $first >= $width;
+
+            // Covered cells are empty; past the width only whether the row has a value matters.
+            if ($xml->localName === 'covered-table-cell' || ($outside && $filled)) {
+                $moved = $xml->next();
+
+                continue;
+            }
+
+            $cell = $xml->expand();
+            $moved = $xml->next();
+            $value = $cell instanceof DOMElement ? $this->value($cell) : '';
+
+            if ($value === '') {
+                continue;
+            }
+
+            if ($first >= XlsxSheets::MAX_COLUMNS) {
+                throw UnreadableSpreadsheet::because('too_large_sheet');
+            }
+
+            $filled = true;
+
+            if ($outside) {
+                continue;
+            }
+
+            for ($i = count($cells); $i < $first; $i++) {
                 $cells[] = '';
             }
 
-            $pendingEmpty = 0;
+            $last = min($first + min($repeat, 1024), $width ?? XlsxSheets::MAX_COLUMNS);
 
-            for ($i = 0; $i < min($repeat, 1024); $i++) {
-                $cells[] = $value;
+            if ($width === null && $first + min($repeat, 1024) > XlsxSheets::MAX_COLUMNS) {
+                throw UnreadableSpreadsheet::because('too_large_sheet');
             }
 
-            if (count($cells) > XlsxSheets::MAX_COLUMNS) {
-                throw UnreadableSpreadsheet::because('too_large_sheet');
+            for ($i = $first; $i < $last; $i++) {
+                $cells[] = $value;
             }
         }
 
-        return $cells;
+        return [$cells, $filled];
     }
 
     private function value(DOMElement $cell): string

@@ -72,7 +72,7 @@ If you have not used Filament's importer yet, follow Filament's [import action g
 - Laravel 12 or 13
 - Filament 5.8 or newer
 
-Tested with the full test suite (106 tests) on:
+Tested with the full test suite (120 tests) on:
 
 | PHP | Laravel | Filament | Livewire | OpenSpout |
 |---|---|---|---|---|
@@ -110,11 +110,11 @@ Measured on the build machine (4 cores, busy with other builds, PHP 8.4) with a 
 | The same file on later requests (cached per upload) | under 0.01 s |
 | Reading all 40,000 rows | 2.2 to 5.3 s |
 
-Filament's import then runs in queued chunks. Hostile files (lying archive sizes, huge shared strings, one huge cell) are refused in 0.1 to 1.4 s.
+Filament's import then runs in queued chunks. Hostile files (lying archive sizes, huge shared strings, one huge cell, rows padded to column XFD, rows of a million cells) are refused in 0.1 to 1.4 s.
 
 Reading stops with a clear message after 50 000 data rows, or one row past `maxRows()` when you set it (Filament then refuses the file with its own message). Every part of a workbook is unpacked once before it is parsed and the bytes it really produces are counted (the sizes an archive states can be false): a part may unpack to 10 MB, or to 100 times its packed size when larger, and the whole workbook to 256 MB. Cells over 32,767 characters (the spreadsheet maximum) and broken XML give a clear message, never an error page.
 
-Further caps, so a 128 MB `memory_limit` is enough for any file that passes them: at most 5,000 parts in an archive (checked on its directory first; images and other media are never unpacked), cells only up to the last spreadsheet column XFD and row 1,048,576, and at most 5 million shared strings or 64 MB of shared text, kept packed in one string. A legal 11.8 MB workbook with 2.6 million shared strings reads in 11 s with a 32 MB memory peak.
+Further caps, so a 128 MB `memory_limit` is enough for any file that passes them: at most 5,000 parts in an archive (checked on its directory first; images and other media are never unpacked), cells only up to the last spreadsheet column XFD and row 1,048,576, at most 16,384 cells in one row (CSV: fields in one line), and at most 2 million shared strings or 64 MB of shared text, kept packed in one string and read only as far as the rows need them. Every row the file holds counts toward the row limit, also one whose values all lie right of the header, and cells right of the header are skipped, never stored. Hostile files that took 25 s to over 200 s before these caps (a million rows with one value in column XFD, a row of a million cells, an ODS row padded to XFD, 5 million shared strings) are refused or read in 0.1 to 1 s; a CSV line of a million fields is refused in about 4 s. The worst file the caps allow, 2 million shared strings with a cell using the last one, takes 3.5 s per read (5.1 s before).
 
 Cached sheet lists, previews and archive checks live in `storage/framework/cache/sheafgate`: the entries of an upload are deleted once its rows are taken over by the import, and entries older than 6 hours are swept. Change the defaults in a service provider:
 
@@ -156,7 +156,7 @@ Uploads on a cloud disk are copied to a temporary local file once per request an
 
 ```bash
 composer install
-composer test      # Pest, 106 tests
+composer test      # Pest, 120 tests
 composer analyse   # PHPStan (Larastan) at the max level
 tools/matrix.sh php8.2 "~5.8.0" "^12.0" f58-l12   # the suite on another PHP/Filament/Laravel pair
 ```

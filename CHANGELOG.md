@@ -14,5 +14,6 @@ First release.
 - The mapping shows an example value next to each file column.
 - Clear messages for old .xls files, damaged workbooks and empty sheets.
 - Safety limits: 50 000 data rows (or `maxRows()`) and real unpacked size counted per workbook part (10 MB or 100x its packed size, 256 MB in total), 32,767 characters per cell, checked before and while reading.
+- Caps on what a file can declare: 16,384 cells per row (CSV: fields per line), every row counted toward the row limit before it is trimmed to the header, cells right of the header never stored, at most 2 million shared strings, read lazily.
 - Formulas without a saved result and error cells (`#DIV/0!`) refuse the file with the cell named, never import 0 or empty.
 - English and Bulgarian translations.

@@ -33,8 +33,12 @@ final class XlsxSheets
 
     public const MAX_ROWS = 1048576;
 
-    /** Shared strings are kept packed: all texts in one string, their start offsets in another. */
-    public const MAX_SHARED_STRINGS = 5000000;
+    /**
+     * Shared strings are kept packed: all texts in one string, their start offsets in another.
+     * 2,000,000 is 40 different texts on every row of a 50,000-row sheet, and reading them
+     * all takes a few seconds; a file that declares more is refused.
+     */
+    public const MAX_SHARED_STRINGS = 2000000;
 
     public const MAX_SHARED_STRING_BYTES = 64 * 1024 * 1024;
 
@@ -43,6 +47,9 @@ final class XlsxSheets
     private string $stringOffsets = '';
 
     private int $stringCount = 0;
+
+    /** The open shared strings part while it has not been read to the end. */
+    private ?XMLReader $stringReader = null;
 
     /** @var array<int, string>|null style index => "date", "duration" or "" */
     private ?array $styleKinds = null;
@@ -104,9 +111,13 @@ final class XlsxSheets
     /**
      * Rows of one sheet as text, keyed by their row number; empty rows are left out.
      *
+     * Rows are read cell by cell, never built whole: a row may hold at most MAX_COLUMNS
+     * cells, and with a width only the first $width columns are kept (a row whose only
+     * values lie past it is still yielded, as an empty list, so it counts as a row).
+     *
      * @return \Generator<int, list<string>>
      */
-    public function rows(string $sheet): \Generator
+    public function rows(string $sheet, ?int $width = null): \Generator
     {
         $path = $this->sheetPath($sheet);
         $this->loadSharedStrings();
@@ -139,16 +150,17 @@ final class XlsxSheets
                 if ($number > self::MAX_ROWS) {
                     throw UnreadableSpreadsheet::because('too_large_sheet');
                 }
-                $row = $xml->expand();
-                $moved = $xml->next();
 
-                if (! $row instanceof DOMElement) {
+                if ($xml->isEmptyElement) {
+                    $moved = $xml->read();
+
                     continue;
                 }
 
-                $cells = $this->cells($row, $kinds);
+                [$cells, $filled] = $this->streamRow($xml, $kinds, $width);
+                $moved = $xml->read();
 
-                if ($cells !== []) {
+                if ($filled) {
                     yield $number => $cells;
                 }
             }
@@ -198,20 +210,43 @@ final class XlsxSheets
     }
 
     /**
+     * Reads the cells of the row the reader stands on and leaves it on the row's end tag.
+     *
      * @param  array<int, string>  $kinds
-     * @return list<string>
+     * @return array{0: list<string>, 1: bool} the kept cells, and whether the row has any value
      */
-    private function cells(DOMElement $row, array $kinds): array
+    private function streamRow(XMLReader $xml, array $kinds, ?int $width): array
     {
+        $depth = $xml->depth;
         $cells = [];
+        $filled = false;
+        $count = 0;
         $next = 0;
+        $moved = $xml->read();
 
-        foreach ($row->childNodes as $cell) {
-            if (! $cell instanceof DOMElement || $cell->localName !== 'c') {
+        while ($moved) {
+            if ($xml->nodeType === XMLReader::END_ELEMENT && $xml->depth === $depth) {
+                break;
+            }
+
+            if ($xml->nodeType !== XMLReader::ELEMENT) {
+                $moved = $xml->read();
+
                 continue;
             }
 
-            $reference = $cell->getAttribute('r');
+            if ($xml->localName !== 'c' || $xml->namespaceURI !== self::MAIN || $xml->depth !== $depth + 1) {
+                $moved = $xml->next();
+
+                continue;
+            }
+
+            // A row can never hold more cells than a sheet has columns.
+            if (++$count > self::MAX_COLUMNS) {
+                throw UnreadableSpreadsheet::because('too_large_sheet');
+            }
+
+            $reference = (string) $xml->getAttribute('r');
             $column = preg_match('/^([A-Z]{1,3})(?![A-Z])/', $reference, $m) ? Headers::columnIndex($m[1]) : (preg_match('/^[A-Z]/', $reference) ? self::MAX_COLUMNS : $next);
             $next = $column + 1;
 
@@ -219,9 +254,26 @@ final class XlsxSheets
                 throw UnreadableSpreadsheet::because('too_large_sheet');
             }
 
-            $value = $this->value($cell, $kinds);
+            $outside = $width !== null && $column >= $width;
+
+            // Past the width only one value matters: whether the row has any at all.
+            if ($outside && $filled) {
+                $moved = $xml->next();
+
+                continue;
+            }
+
+            $cell = $xml->expand();
+            $moved = $xml->next();
+            $value = $cell instanceof DOMElement ? $this->value($cell, $kinds) : '';
 
             if ($value === '') {
+                continue;
+            }
+
+            $filled = true;
+
+            if ($outside) {
                 continue;
             }
 
@@ -234,7 +286,7 @@ final class XlsxSheets
 
         ksort($cells);
 
-        return array_values($cells);
+        return [array_values($cells), $filled];
     }
 
     /**
@@ -332,6 +384,14 @@ final class XlsxSheets
 
     private function sharedString(int $index): string
     {
+        if ($index >= self::MAX_SHARED_STRINGS) {
+            throw UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) (self::MAX_SHARED_STRING_BYTES / 1024 / 1024)]);
+        }
+
+        if ($index >= $this->stringCount) {
+            $this->readStringsUpTo($index);
+        }
+
         if ($this->stringData === null || $index < 0 || $index >= $this->stringCount) {
             return '';
         }
@@ -347,8 +407,10 @@ final class XlsxSheets
     }
 
     /**
-     * Reads the shared strings into one packed string (a PHP array of millions of strings
-     * needs several times the memory), with limits on their number and size.
+     * Prepares the shared strings. They are read lazily, only as far as the highest index a
+     * cell has asked for (Excel writes them in the order they first appear, so the first rows
+     * of a sheet need only the first strings), into one packed string (a PHP array of
+     * millions of strings needs several times the memory), with limits on their number and size.
      */
     private function loadSharedStrings(): void
     {
@@ -359,45 +421,95 @@ final class XlsxSheets
         $this->stringData = '';
         $path = $this->relatedPart('sharedStrings') ?? 'xl/sharedStrings.xml';
 
-        if (! $this->exists($path)) {
+        if ($this->exists($path)) {
+            $this->stringReader = $this->open($path);
+        }
+    }
+
+    /**
+     * Reads shared strings until the one with the given index is read or the list ends.
+     */
+    private function readStringsUpTo(int $index): void
+    {
+        $xml = $this->stringReader;
+
+        if ($xml === null || $this->stringData === null) {
             return;
         }
 
-        $xml = $this->open($path);
-        $data = '';
-        $offsets = '';
-        $count = 0;
+        $finished = false;
 
+        // Appended in place: copying the packed strings into a local variable would double
+        // their memory and copy them again on every call.
         try {
-            $moved = $xml->read();
+            while ($this->stringCount <= $index) {
+                if (! $xml->read()) {
+                    $finished = true;
 
-            while ($moved) {
-                if ($xml->nodeType === XMLReader::ELEMENT && $xml->localName === 'si' && $xml->namespaceURI === self::MAIN) {
-                    $node = $xml->expand();
-                    $offsets .= pack('V', strlen($data));
-                    $data .= $node instanceof DOMElement ? $this->richText($node) : '';
-                    $count++;
+                    break;
+                }
 
-                    if ($count > self::MAX_SHARED_STRINGS || strlen($data) > self::MAX_SHARED_STRING_BYTES) {
-                        throw UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) (self::MAX_SHARED_STRING_BYTES / 1024 / 1024)]);
-                    }
-
-                    $moved = $xml->next();
-
+                if ($xml->nodeType !== XMLReader::ELEMENT || $xml->localName !== 'si' || $xml->namespaceURI !== self::MAIN) {
                     continue;
                 }
 
-                $moved = $xml->read();
-            }
+                $this->stringOffsets .= pack('V', strlen($this->stringData));
+                $this->stringData .= $this->streamedText($xml);
+                $this->stringCount++;
 
-            $this->assertWellFormed();
+                if ($this->stringCount > self::MAX_SHARED_STRINGS || strlen($this->stringData) > self::MAX_SHARED_STRING_BYTES) {
+                    $finished = true;
+
+                    throw UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) (self::MAX_SHARED_STRING_BYTES / 1024 / 1024)]);
+                }
+            }
         } finally {
-            $xml->close();
+            if ($finished) {
+                $xml->close();
+                $this->stringReader = null;
+            }
         }
 
-        $this->stringData = $data;
-        $this->stringOffsets = $offsets;
-        $this->stringCount = $count;
+        if ($finished) {
+            $this->assertWellFormed();
+        }
+    }
+
+    public function __destruct()
+    {
+        $this->stringReader?->close();
+    }
+
+    /**
+     * Text of the string item the reader stands on, read without building it as a DOM
+     * (several times faster for millions of items): its runs joined, phonetic hints (rPh)
+     * left out. Leaves the reader on the item's end tag.
+     */
+    private function streamedText(XMLReader $xml): string
+    {
+        if ($xml->isEmptyElement) {
+            return '';
+        }
+
+        $depth = $xml->depth;
+        $text = '';
+        $moved = $xml->read();
+
+        while ($moved && ! ($xml->nodeType === XMLReader::END_ELEMENT && $xml->depth === $depth)) {
+            if ($xml->nodeType === XMLReader::ELEMENT && $xml->namespaceURI === self::MAIN && ($xml->localName === 't' || $xml->localName === 'rPh')) {
+                if ($xml->localName === 't') {
+                    $text .= $xml->readString();
+                }
+
+                $moved = $xml->next();
+
+                continue;
+            }
+
+            $moved = $xml->read();
+        }
+
+        return $text;
     }
 
     /**
