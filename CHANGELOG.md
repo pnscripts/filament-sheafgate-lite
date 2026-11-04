@@ -15,5 +15,7 @@ First release.
 - Clear messages for old .xls files, damaged workbooks and empty sheets.
 - Safety limits: 50 000 data rows (or `maxRows()`) and real unpacked size counted per workbook part (10 MB or 100x its packed size, 256 MB in total), 32,767 characters per cell, checked before and while reading.
 - Caps on what a file can declare: 16,384 cells per row (CSV: fields per line), every row counted toward the row limit before it is trimmed to the header, cells right of the header never stored, at most 2 million shared strings, read lazily.
+- Hardened after security review round 6: every archive part measured whatever its name, no padding to whitespace-only far cells, one row-element budget (2,097,152) and one cell-element budget (4,000,000) per request, empty rows and cells included, shared parts read once, at most 1,000 sheets, libxml's nesting limit kept (no `LIBXML_PARSEHUGE`), ODS space runs clamped, CSV blank lines counted and CSV cells capped at 32,767 characters.
+- Excel's 1900 date system: serials 1 to 59 (1900-01-01 to 1900-02-28) read as Excel shows them.
 - Formulas without a saved result and error cells (`#DIV/0!`) refuse the file with the cell named, never import 0 or empty.
 - English and Bulgarian translations.

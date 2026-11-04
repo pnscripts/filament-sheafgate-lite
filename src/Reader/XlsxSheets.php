@@ -2,6 +2,7 @@
 
 namespace PNScripts\SheafgateLite\Reader;
 
+use Closure;
 use DateTimeImmutable;
 use DOMElement;
 use PNScripts\SheafgateLite\Exceptions\UnreadableSpreadsheet;
@@ -42,6 +43,15 @@ final class XlsxSheets
 
     public const MAX_SHARED_STRING_BYTES = 64 * 1024 * 1024;
 
+    /**
+     * Workbook, relationship and similar small parts are read whole into a DOM; a real one is
+     * a few kilobytes, so anything above this is refused before it is parsed.
+     */
+    public const MAX_DOM_PART_BYTES = 4 * 1024 * 1024;
+
+    /** More cell formats or number formats than Excel allows (64,000) in one workbook. */
+    public const MAX_STYLES = 100000;
+
     private ?string $stringData = null;
 
     private string $stringOffsets = '';
@@ -56,7 +66,10 @@ final class XlsxSheets
 
     private bool $date1904 = false;
 
-    public function __construct(private readonly string $path) {}
+    /**
+     * @param  (Closure(): void)|null  $onCell  called for every cell element read (the caller's budget)
+     */
+    public function __construct(private readonly string $path, private readonly ?Closure $onCell = null) {}
 
     /**
      * @return list<array{name: string, path: string, visible: bool}>
@@ -114,10 +127,16 @@ final class XlsxSheets
      * Rows are read cell by cell, never built whole: a row may hold at most MAX_COLUMNS
      * cells, and with a width only the first $width columns are kept (a row whose only
      * values lie past it is still yielded, as an empty list, so it counts as a row).
+     * Without a width, whitespace-only cells after the last filled one are dropped, never padded.
      *
+     * Every element outside the rows' cells, empty rows included, is passed to $onElement
+     * (the caller's budget). With $only, just that row is read: the rows above it are skipped
+     * unread and reading stops after it.
+     *
+     * @param  (Closure(): void)|null  $onElement
      * @return \Generator<int, list<string>>
      */
-    public function rows(string $sheet, ?int $width = null): \Generator
+    public function rows(string $sheet, ?int $width = null, ?Closure $onElement = null, ?int $only = null): \Generator
     {
         $path = $this->sheetPath($sheet);
         $this->loadSharedStrings();
@@ -129,7 +148,17 @@ final class XlsxSheets
             $moved = $xml->read();
 
             while ($moved) {
-                if ($xml->nodeType !== XMLReader::ELEMENT || $xml->namespaceURI !== self::MAIN) {
+                if ($xml->nodeType !== XMLReader::ELEMENT) {
+                    $moved = $xml->read();
+
+                    continue;
+                }
+
+                if ($onElement !== null) {
+                    $onElement();
+                }
+
+                if ($xml->namespaceURI !== self::MAIN) {
                     $moved = $xml->read();
 
                     continue;
@@ -151,6 +180,17 @@ final class XlsxSheets
                     throw UnreadableSpreadsheet::because('too_large_sheet');
                 }
 
+                if ($only !== null && $number !== $only) {
+                    if ($number > $only) {
+                        break;
+                    }
+
+                    // A row above the wanted one: skipped without reading its cells.
+                    $moved = $xml->next();
+
+                    continue;
+                }
+
                 if ($xml->isEmptyElement) {
                     $moved = $xml->read();
 
@@ -162,6 +202,10 @@ final class XlsxSheets
 
                 if ($filled) {
                     yield $number => $cells;
+                }
+
+                if ($only !== null) {
+                    break;
                 }
             }
 
@@ -218,7 +262,9 @@ final class XlsxSheets
     private function streamRow(XMLReader $xml, array $kinds, ?int $width): array
     {
         $depth = $xml->depth;
+        /** @var array<int, string> $cells kept values by column, padded only at the end */
         $cells = [];
+        $last = -1;
         $filled = false;
         $count = 0;
         $next = 0;
@@ -246,8 +292,19 @@ final class XlsxSheets
                 throw UnreadableSpreadsheet::because('too_large_sheet');
             }
 
+            if ($this->onCell !== null) {
+                ($this->onCell)();
+            }
+
+            // The column from the reference's letters (strspn, not a regex: this runs for
+            // every cell); more than three letters is past XFD, no reference is the next column.
             $reference = (string) $xml->getAttribute('r');
-            $column = preg_match('/^([A-Z]{1,3})(?![A-Z])/', $reference, $m) ? Headers::columnIndex($m[1]) : (preg_match('/^[A-Z]/', $reference) ? self::MAX_COLUMNS : $next);
+            $letters = $reference === '' ? 0 : strspn($reference, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ');
+            $column = match (true) {
+                $letters === 0 => $next,
+                $letters > 3 => self::MAX_COLUMNS,
+                default => Headers::columnIndex(substr($reference, 0, $letters)),
+            };
             $next = $column + 1;
 
             if ($column >= self::MAX_COLUMNS) {
@@ -263,7 +320,16 @@ final class XlsxSheets
                 continue;
             }
 
-            $cell = $xml->expand();
+            // An empty cell (<c r="B2" s="3"/>) has no value, except an error cell without
+            // its code: skipped without building it.
+            if ($xml->isEmptyElement && $xml->getAttribute('t') !== 'e') {
+                $moved = $xml->next();
+
+                continue;
+            }
+
+            // A cell past libxml's nesting limit does not expand: the parse error ends the read.
+            $cell = @$xml->expand();
             $moved = $xml->next();
             $value = $cell instanceof DOMElement ? $this->value($cell, $kinds) : '';
 
@@ -277,16 +343,21 @@ final class XlsxSheets
                 continue;
             }
 
-            for ($i = count($cells); $i < $column; $i++) {
-                $cells[] = '';
-            }
-
             $cells[$column] = $value;
+
+            // Without a width a whitespace-only far cell must not pad the row to it.
+            if ($column > $last && ($width !== null || trim($value) !== '')) {
+                $last = $column;
+            }
         }
 
-        ksort($cells);
+        $row = [];
 
-        return [array_values($cells), $filled];
+        for ($i = 0; $i <= $last; $i++) {
+            $row[] = $cells[$i] ?? '';
+        }
+
+        return [$row, $filled];
     }
 
     /**
@@ -359,7 +430,15 @@ final class XlsxSheets
                 $seconds = 0;
             }
 
-            $date = (new DateTimeImmutable($this->date1904 ? '1904-01-01' : '1899-12-30'))
+            // Excel's 1900 system counts a 29 February 1900 that never was (serial 60), so
+            // serials 1 to 59 count from 31 December 1899 and later ones from the 30th.
+            $base = match (true) {
+                $this->date1904 => '1904-01-01',
+                $days >= 1 && $days < 60 => '1899-12-31',
+                default => '1899-12-30',
+            };
+
+            $date = (new DateTimeImmutable($base))
                 ->modify(($days >= 0 ? '+' : '') . $days . ' days')
                 ->modify('+' . $seconds . ' seconds');
 
@@ -544,39 +623,76 @@ final class XlsxSheets
         }
 
         $path = $this->relatedPart('styles') ?? 'xl/styles.xml';
-        $content = $this->exists($path) ? $this->entry($path) : null;
 
-        if ($content === null) {
+        if (! $this->exists($path)) {
             return $this->styleKinds = [];
         }
 
-        $dom = $this->dom($content);
+        // Streamed: only number formats and the cell formats (cellXfs) are read; fonts, fills,
+        // borders and the rest are skipped unread.
+        $xml = $this->open($path);
         $codes = [];
+        $formats = [];
+        $inFormats = false;
+        $seenFormats = false;
 
-        foreach ($dom->getElementsByTagNameNS(self::MAIN, 'numFmt') as $format) {
-            $codes[(int) $format->getAttribute('numFmtId')] = $format->getAttribute('formatCode');
+        try {
+            $moved = $xml->read();
+
+            while ($moved) {
+                if ($xml->nodeType === XMLReader::END_ELEMENT && $inFormats && $xml->depth === 1) {
+                    $inFormats = false;
+                    $seenFormats = true;
+                }
+
+                if ($xml->nodeType !== XMLReader::ELEMENT || $xml->depth === 0) {
+                    $moved = $xml->read();
+
+                    continue;
+                }
+
+                $name = $xml->namespaceURI === self::MAIN ? $xml->localName : '';
+
+                if ($xml->depth === 1) {
+                    if ($name === 'cellXfs' && ! $seenFormats && ! $xml->isEmptyElement) {
+                        $inFormats = true;
+                        $moved = $xml->read();
+                    } elseif ($name === 'numFmts') {
+                        $moved = $xml->read();
+                    } else {
+                        $moved = $xml->next();
+                    }
+
+                    continue;
+                }
+
+                if ($xml->depth === 2 && $name === 'numFmt') {
+                    $codes[(int) $xml->getAttribute('numFmtId')] = (string) $xml->getAttribute('formatCode');
+                } elseif ($xml->depth === 2 && $inFormats && $name === 'xf') {
+                    $formats[] = (int) $xml->getAttribute('numFmtId');
+                }
+
+                if (count($codes) > self::MAX_STYLES || count($formats) > self::MAX_STYLES) {
+                    throw UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) round(SpreadsheetReader::$maxEntryBytes / 1024 / 1024)]);
+                }
+
+                $moved = $xml->next();
+            }
+
+            $this->assertWellFormed();
+        } finally {
+            $xml->close();
         }
 
         $kinds = [];
 
-        foreach ($dom->getElementsByTagNameNS(self::MAIN, 'cellXfs') as $list) {
-            $index = 0;
-
-            foreach ($list->childNodes as $xf) {
-                if (! $xf instanceof DOMElement || $xf->localName !== 'xf') {
-                    continue;
-                }
-
-                $id = (int) $xf->getAttribute('numFmtId');
-                $kinds[$index++] = match (true) {
-                    isset($codes[$id]) => self::formatKind($codes[$id]),
-                    $id === 46 => 'duration',
-                    in_array($id, self::DATE_FORMAT_IDS, true) => 'date',
-                    default => '',
-                };
-            }
-
-            break;
+        foreach ($formats as $index => $id) {
+            $kinds[$index] = match (true) {
+                isset($codes[$id]) => self::formatKind($codes[$id]),
+                $id === 46 => 'duration',
+                in_array($id, self::DATE_FORMAT_IDS, true) => 'date',
+                default => '',
+            };
         }
 
         return $this->styleKinds = $kinds;
@@ -601,6 +717,14 @@ final class XlsxSheets
         }
 
         return preg_match('/[dmyhs]/', $code) ? 'date' : '';
+    }
+
+    /**
+     * The workbook part a sheet's cells are in (several sheets may name the same one).
+     */
+    public function part(string $sheet): string
+    {
+        return $this->sheetPath($sheet);
     }
 
     private function sheetPath(string $sheet): string
@@ -658,10 +782,37 @@ final class XlsxSheets
             throw UnreadableSpreadsheet::because('unreadable');
         }
 
-        $content = $zip->getFromName($entry);
-        $zip->close();
+        try {
+            $stream = $zip->locateName($entry) === false ? false : $zip->getStream($entry);
 
-        return is_string($content) ? $content : null;
+            if ($stream === false) {
+                return null;
+            }
+
+            $content = '';
+
+            try {
+                while (! feof($stream)) {
+                    $chunk = fread($stream, 1024 * 1024);
+
+                    if ($chunk === false || $chunk === '') {
+                        break;
+                    }
+
+                    $content .= $chunk;
+
+                    if (strlen($content) > self::MAX_DOM_PART_BYTES) {
+                        throw UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) round(SpreadsheetReader::$maxEntryBytes / 1024 / 1024)]);
+                    }
+                }
+            } finally {
+                fclose($stream);
+            }
+
+            return $content;
+        } finally {
+            $zip->close();
+        }
     }
 
     private function dom(string $xml): \DOMDocument
@@ -687,12 +838,16 @@ final class XlsxSheets
         }
     }
 
+    /**
+     * Without LIBXML_PARSEHUGE: libxml keeps its nesting limit (256 levels), so a cell nested
+     * 50,000 levels deep is a clean parse error instead of a stack overflow in expand().
+     */
     private function open(string $entry): XMLReader
     {
         libxml_clear_errors();
         $xml = new XMLReader;
 
-        if (! @$xml->open('zip://' . $this->path . '#' . $entry, null, LIBXML_NONET | LIBXML_COMPACT | LIBXML_PARSEHUGE)) {
+        if (! @$xml->open('zip://' . $this->path . '#' . $entry, null, LIBXML_NONET | LIBXML_COMPACT)) {
             throw UnreadableSpreadsheet::because('unreadable');
         }
 

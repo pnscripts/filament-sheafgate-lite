@@ -2,6 +2,7 @@
 
 namespace PNScripts\SheafgateLite\Reader;
 
+use Closure;
 use League\Csv\Reader as CsvReader;
 use PNScripts\SheafgateLite\Exceptions\UnreadableSpreadsheet;
 use Throwable;
@@ -34,10 +35,41 @@ final class SpreadsheetReader
     /** How many times a workbook was read row by row (for tests and diagnostics). */
     public static int $parses = 0;
 
-    
+    /** More sheets than any real workbook lists. */
+    public const MAX_SHEETS = 1000;
+
+    /** The preview of a sheet stops after this many rows that hold only whitespace. */
+    public const PREVIEW_BLANK_ROWS = 1000;
+
+    public const DEFAULT_MAX_ROW_ELEMENTS = 2 * XlsxSheets::MAX_ROWS;
+
+    /**
+     * Row elements (empty ones included) and other sheet elements one reader may walk in
+     * all its passes together: every sheet it previews and every full read. A sheet of a
+     * million empty rows, or many sheets of them, ends here instead of being walked again.
+     */
+    public static int $maxRowElements = self::DEFAULT_MAX_ROW_ELEMENTS;
+
+    public const DEFAULT_MAX_CELL_ELEMENTS = 4000000;
+
+    /**
+     * Cell elements, empty ones included, one reader may read in all its passes together:
+     * a 50,000-row sheet of 80 columns. Empty cells cost almost nothing to store, so
+     * without this a 3 MB upload of 60 million <c/> elements kept PHP busy for minutes.
+     */
+    public static int $maxCellElements = self::DEFAULT_MAX_CELL_ELEMENTS;
 
     /** The row limit of this reader (defaults to $maxRows). */
     public ?int $rowLimit = null;
+
+    /** Elements walked so far by this reader (see $maxRowElements). */
+    private int $rowElements = 0;
+
+    /** Cell elements read so far by this reader (see $maxCellElements). */
+    private int $cellElements = 0;
+
+    /** The first sheet with data, once found (false: not looked for yet). */
+    private string|null|false $firstSheet = false;
 
     private ?CsvSource $csv = null;
 
@@ -141,20 +173,22 @@ final class SpreadsheetReader
         $total = 0;
         $totalLimit = min(self::$maxEntryBytes, max(10 * 1024 * 1024, (int) filesize($path) * self::MAX_RATIO));
 
-        // The sizes in the archive's directory can lie, so every part that is read later
-        // (XML and relationship parts) is unpacked here and the bytes it really produces are
-        // counted, stopping at the first limit it passes. Images and other media are never read.
+        // The sizes in the archive's directory can lie, so every entry is unpacked here and
+        // the bytes it really produces are counted, stopping at the first limit it passes.
+        // Every entry, whatever its name: a relationship may point the reader at any part
+        // (a sheet named sheet1.bin, styles.dat), and entries are opened by index, so two
+        // entries with the same name are both measured.
         for ($index = 0; $index < $zip->numFiles; $index++) {
             $stat = $zip->statIndex($index);
             $name = $stat === false ? false : $zip->getNameIndex($index);
 
-            if ($stat === false || $name === false || str_ends_with($name, '/') || ! preg_match('/(\.xml|\.rels|^mimetype)$/i', $name)) {
+            if ($stat === false || $name === false || str_ends_with($name, '/')) {
                 continue;
             }
 
             $packed = max(1, (int) $stat['comp_size']);
             $limit = min(self::$maxEntryBytes, max(10 * 1024 * 1024, $packed * self::MAX_RATIO));
-            $stream = $zip->getStream($name);
+            $stream = $zip->getStreamIndex($index);
 
             if ($stream === false) {
                 throw UnreadableSpreadsheet::because('unreadable');
@@ -301,7 +335,13 @@ final class SpreadsheetReader
     {
         if ($this->format === 'ods') {
             try {
-                return (new OdsSheets($this->path))->names();
+                $names = $this->withXmlErrors(fn (): array => (new OdsSheets($this->path, $this->spendCell(...)))->names());
+
+                if (count($names) > self::MAX_SHEETS) {
+                    throw UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) round(self::$maxEntryBytes / 1024 / 1024)]);
+                }
+
+                return $names;
             } catch (UnreadableSpreadsheet $exception) {
                 throw $exception;
             } catch (Throwable $exception) {
@@ -317,6 +357,10 @@ final class SpreadsheetReader
             throw UnreadableSpreadsheet::because('unreadable', $exception);
         }
 
+        if (count($sheets) > self::MAX_SHEETS) {
+            throw UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) round(self::$maxEntryBytes / 1024 / 1024)]);
+        }
+
         $all = array_column($sheets, 'name');
         $visible = array_column(array_filter($sheets, fn (array $sheet): bool => $sheet['visible']), 'name');
 
@@ -328,13 +372,110 @@ final class SpreadsheetReader
      */
     public function firstSheetWithData(): ?string
     {
-        foreach ($this->sheets() as $sheet) {
+        if ($this->firstSheet !== false) {
+            return $this->firstSheet;
+        }
+
+        $sheets = $this->sheets();
+
+        // An ODS workbook keeps every sheet in one part: one pass finds the sheet, instead of
+        // one pass per sheet that walks all the sheets before it again.
+        if ($this->format === 'ods' && count($sheets) > 1) {
+            $cache = self::cachePath($this->path, 'first');
+            $found = $cache !== null && is_file($cache) ? (string) file_get_contents($cache) : null;
+
+            if ($found === null) {
+                $found = (string) $this->withXmlErrors(fn (): ?string => (new OdsSheets($this->path, $this->spendCell(...)))->firstFilled($this->spendRowElement(...), self::PREVIEW_BLANK_ROWS));
+
+                if ($cache !== null) {
+                    @file_put_contents($cache, $found);
+                }
+            }
+
+            return $this->firstSheet = in_array($found, $sheets, true) ? $found : $sheets[0];
+        }
+
+        // Sheets that point at a part already looked at are not read again.
+        $seen = [];
+
+        foreach ($sheets as $sheet) {
+            $key = $this->previewKey($sheet);
+
+            if (isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+
             if ($this->preview($sheet, 1) !== []) {
-                return $sheet;
+                return $this->firstSheet = $sheet;
             }
         }
 
-        return $this->sheets()[0] ?? null;
+        return $this->firstSheet = $sheets[0] ?? null;
+    }
+
+    /**
+     * What a sheet's preview is kept under: its workbook part for XLSX, where several sheets
+     * may point at the same part, otherwise its name.
+     */
+    private function previewKey(?string $sheet): string
+    {
+        $sheet = $this->resolveSheet($sheet);
+
+        if ($this->format === 'xlsx' && $sheet !== null) {
+            try {
+                return 'part:' . $this->xlsx()->part($sheet);
+            } catch (Throwable) {
+                // An unknown sheet is refused when it is read.
+            }
+        }
+
+        return (string) $sheet;
+    }
+
+    /**
+     * Counts one walked element against this reader's budget.
+     */
+    private function spendRowElement(): void
+    {
+        if (++$this->rowElements > self::$maxRowElements) {
+            throw UnreadableSpreadsheet::because('too_many_rows', replace: ['max' => number_format($this->rowLimit ?? self::$maxRows)]);
+        }
+    }
+
+    /**
+     * Counts one read cell element against this reader's budget.
+     */
+    private function spendCell(): void
+    {
+        if (++$this->cellElements > self::$maxCellElements) {
+            throw UnreadableSpreadsheet::because('too_many_cells', replace: ['max' => number_format(self::$maxCellElements)]);
+        }
+    }
+
+    /**
+     * Runs a reader step with libxml errors collected, never shown, and any failure as a clear message.
+     *
+     * @template T
+     *
+     * @param  Closure(): T  $step
+     * @return T
+     */
+    private function withXmlErrors(Closure $step): mixed
+    {
+        $previous = libxml_use_internal_errors(true);
+
+        try {
+            return $step();
+        } catch (UnreadableSpreadsheet $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            throw UnreadableSpreadsheet::because('unreadable', $exception);
+        } finally {
+            libxml_clear_errors();
+            libxml_use_internal_errors($previous);
+        }
     }
 
     /**
@@ -344,7 +485,7 @@ final class SpreadsheetReader
      */
     public function preview(?string $sheet = null, int $limit = self::PREVIEW_ROWS): array
     {
-        $key = (string) $this->resolveSheet($sheet);
+        $key = $this->previewKey($sheet);
 
         if (! isset($this->previews[$key])) {
             $cache = self::cachePath($this->path, 'preview', $key . '|' . $this->csvEncoding . '|' . $this->csvDelimiter);
@@ -360,9 +501,16 @@ final class SpreadsheetReader
                 }
             } else {
                 $rows = [];
+                $blank = 0;
 
+                // Rows come without a width (the header is not known yet), so whitespace-only
+                // far cells are never padded; a sheet of such rows ends the preview early.
                 foreach ($this->cells($sheet) as $number => $cells) {
                     if (implode('', array_map('trim', $cells)) === '') {
+                        if (++$blank > self::PREVIEW_BLANK_ROWS) {
+                            break;
+                        }
+
                         continue;
                     }
 
@@ -453,19 +601,31 @@ final class SpreadsheetReader
      */
     public function cells(?string $sheet = null, ?int $width = null): \Generator
     {
+        yield from $this->scan($sheet, $width);
+    }
+
+    /**
+     * @return \Generator<int, list<string>>
+     */
+    private function scan(?string $sheet, ?int $width, ?int $only = null): \Generator
+    {
         self::$parses++;
         $scanned = 0;
         $maxScanned = max(100000, ($this->rowLimit ?? self::$maxRows) * 4);
+        $count = function () use (&$scanned, $maxScanned): void {
+            if (++$scanned > $maxScanned) {
+                throw UnreadableSpreadsheet::because('too_many_rows', replace: ['max' => number_format($this->rowLimit ?? self::$maxRows)]);
+            }
+        };
         $previous = libxml_use_internal_errors(true);
 
         try {
-            foreach ($this->readCells($sheet, $width) as $number => $cells) {
+            foreach ($this->readCells($sheet, $width, $only, $count) as $number => $cells) {
                 // Empty rows count too: a sheet can claim a row number in the millions.
-                if (++$scanned > $maxScanned) {
-                    throw UnreadableSpreadsheet::because('too_many_rows', replace: ['max' => number_format($this->rowLimit ?? self::$maxRows)]);
-                }
+                $count();
 
-                foreach ($this->format === 'csv' ? [] : $cells as $value) {
+                // CSV included: a CSV cell is no longer than a spreadsheet cell either.
+                foreach ($cells as $value) {
                     if (strlen($value) > self::MAX_CELL_LENGTH && mb_strlen($value) > self::MAX_CELL_LENGTH) {
                         throw UnreadableSpreadsheet::because('cell_too_long', replace: ['max' => number_format(self::MAX_CELL_LENGTH)]);
                     }
@@ -485,17 +645,35 @@ final class SpreadsheetReader
     }
 
     /**
+     * @param  Closure(): void  $countBlank  counts a blank CSV record toward the scanned rows
      * @return \Generator<int, list<string>>
      */
-    private function readCells(?string $sheet, ?int $width): \Generator
+    private function readCells(?string $sheet, ?int $width, ?int $only, Closure $countBlank): \Generator
     {
         $csv = $this->csv();
 
         if ($csv !== null) {
             $reader = CsvReader::from($csv->path);
             $reader->setDelimiter($csv->delimiter);
+            // Blank lines are counted, never skipped silently: a file of millions of them
+            // is refused at the scanned-row cap like any other sheet.
+            $reader->includeEmptyRecords();
 
             foreach ($reader->getRecords() as $offset => $record) {
+                if ($record === [] || $record === [null]) {
+                    $countBlank();
+
+                    continue;
+                }
+
+                if ($only !== null && $offset + 1 !== $only) {
+                    if ($offset + 1 > $only) {
+                        return;
+                    }
+
+                    continue;
+                }
+
                 // The same column limit as a spreadsheet: a line of a million fields is refused.
                 if (count($record) > XlsxSheets::MAX_COLUMNS) {
                     throw UnreadableSpreadsheet::because('too_large_sheet');
@@ -516,12 +694,12 @@ final class SpreadsheetReader
         $sheet = $this->resolveSheet($sheet);
 
         if ($this->format === 'ods') {
-            yield from (new OdsSheets($this->path))->rows((string) $sheet, $width);
+            yield from (new OdsSheets($this->path, $this->spendCell(...)))->rows((string) $sheet, $width, $this->spendRowElement(...), $only);
 
             return;
         }
 
-        yield from $this->xlsx()->rows((string) $sheet, $width);
+        yield from $this->xlsx()->rows((string) $sheet, $width, $this->spendRowElement(...), $only);
     }
 
     private function resolveSheet(?string $sheet): ?string
@@ -542,7 +720,8 @@ final class SpreadsheetReader
      */
     private function rowAt(?string $sheet, int $number): ?array
     {
-        foreach ($this->cells($sheet) as $index => $cells) {
+        // Only that row is read: the rows above it are skipped unread, never padded.
+        foreach ($this->scan($sheet, null, $number) as $index => $cells) {
             if ($index === $number) {
                 return $cells;
             }
@@ -586,7 +765,7 @@ final class SpreadsheetReader
         try {
             return match ($this->format) {
                 'xlsx' => $this->xlsxMerges($sheet, $headerRow),
-                'ods' => (new OdsSheets($this->path))->merges((string) $sheet, $headerRow),
+                'ods' => (new OdsSheets($this->path, $this->spendCell(...)))->merges((string) $sheet, $headerRow, $this->spendRowElement(...)),
                 default => [],
             };
         } catch (Throwable) {
@@ -625,6 +804,6 @@ final class SpreadsheetReader
 
     private function xlsx(): XlsxSheets
     {
-        return $this->xlsxSheets ??= new XlsxSheets($this->path);
+        return $this->xlsxSheets ??= new XlsxSheets($this->path, $this->spendCell(...));
     }
 }

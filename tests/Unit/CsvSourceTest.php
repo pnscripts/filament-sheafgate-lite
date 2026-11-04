@@ -81,7 +81,9 @@ it('normalises encoding names', function () {
 });
 
 it('keeps a UTF-8 character split by the sample boundary as UTF-8', function () {
-    $line = str_repeat('я', 40000); // 80 000 bytes, the 64 KiB sample ends inside a character
+    // 90 000 bytes in 30,000 characters (under the 32,767-character cell limit): the 64 KiB
+    // sample ends inside a character.
+    $line = str_repeat('€', 30000);
     $result = csvRows("A,B\n1,{$line}\n");
 
     expect($result['encoding'])->toBe('UTF-8')
