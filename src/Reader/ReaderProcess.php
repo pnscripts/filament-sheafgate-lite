@@ -99,7 +99,7 @@ final class ReaderProcess
 
     /**
      * The PHP command-line binary: SpreadsheetReader::$phpBinary when set, otherwise this
-     * process's own binary when it is the CLI, otherwise `php` next to it (under PHP-FPM,
+     * process's own binary when it is the CLI or its built-in server, otherwise `php8.x` or `php` next to it (under PHP-FPM,
      * PHP_BINARY is php-fpm, which cannot run a script).
      */
     public static function binary(): ?string
@@ -110,11 +110,13 @@ final class ReaderProcess
             return $configured;
         }
 
-        if (in_array(PHP_SAPI, ['cli', 'phpdbg'], true) && is_executable(PHP_BINARY)) {
+        // The command-line binary and its built-in server run scripts; php-fpm does not.
+        if (in_array(PHP_SAPI, ['cli', 'phpdbg', 'cli-server'], true) && is_executable(PHP_BINARY)) {
             return PHP_BINARY;
         }
 
-        foreach ([PHP_BINDIR . '/php', PHP_BINDIR . '/php' . PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION, '/usr/local/bin/php', '/usr/bin/php'] as $candidate) {
+        // The same PHP version first (php8.2 next to php-fpm8.2), then the default `php`.
+        foreach ([PHP_BINDIR . '/php' . PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION, PHP_BINDIR . '/php', '/usr/local/bin/php', '/usr/bin/php'] as $candidate) {
             if (is_file($candidate) && is_executable($candidate)) {
                 return $candidate;
             }
