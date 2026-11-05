@@ -376,7 +376,10 @@ final class XlsxSheets
                 throw UnreadableSpreadsheet::because('too_large_sheet');
             }
 
-            $budget->cells();
+            // An empty cell (<c r="B2" s="3"/>) has no value, except an error cell without its
+            // code; it counts half a cell, and allows half the node it is.
+            $empty = $xml->isEmptyElement && $xml->getAttribute('t') !== 'e';
+            $empty ? $budget->emptyCell() : $budget->cells();
 
             // The column from the reference's letters (strspn, not a regex: this runs for
             // every cell); more than three letters is past XFD, no reference is the next column.
@@ -402,8 +405,7 @@ final class XlsxSheets
                 continue;
             }
 
-            // An empty cell (<c r="B2" s="3"/>) has no value, except an error cell without its code.
-            if ($xml->isEmptyElement && $xml->getAttribute('t') !== 'e') {
+            if ($empty) {
                 $moved = $xml->read() && XmlStream::count($xml, $budget);
 
                 continue;
@@ -689,6 +691,9 @@ final class XlsxSheets
                     continue;
                 }
 
+                // Strings read to reach a late index give no values of their own: each item
+                // brings its own allowance of nodes (a late string must not starve the sheet).
+                $this->budget->stringItem();
                 $this->stringOffsets .= pack('V', strlen($this->stringData));
                 $this->stringData .= $this->streamedText($xml);
                 $this->stringCount++;

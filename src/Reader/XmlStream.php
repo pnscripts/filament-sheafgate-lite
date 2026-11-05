@@ -24,8 +24,9 @@ final class XmlStream
      */
     public static function count(XMLReader $xml, Budget $budget): bool
     {
-        if (++$budget->nodes > $budget->allowance) {
-            throw $budget->nodesSpent();
+        // One comparison per node: $limit is the allowance, or the next clock check if sooner.
+        if (++$budget->nodes > $budget->limit) {
+            $budget->checkpoint();
         }
 
         $type = $xml->nodeType;

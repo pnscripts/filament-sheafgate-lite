@@ -49,23 +49,38 @@ final class SpreadsheetReader
      */
     public static int $maxRowElements = self::DEFAULT_MAX_ROW_ELEMENTS;
 
-    public const DEFAULT_MAX_CELL_ELEMENTS = 4000000;
+    public const DEFAULT_MAX_CELL_ELEMENTS = 6000000;
 
     /**
-     * Cell elements, empty ones included, one reader may read in all its passes together:
-     * a 50,000-row sheet of 80 columns. Empty cells cost almost nothing to store, so
-     * without this a 3 MB upload of 60 million <c/> elements kept PHP busy for minutes.
+     * Cell elements one reader may read in all its passes together: a 50,000-row sheet of
+     * 80 columns (the design point) with half again as headroom. An empty cell element
+     * (<c r="B2" s="1"/>, as formatted templates have them by the thousand) counts half.
+     * Empty cells cost almost nothing to store, so without this a 3 MB upload of 60 million
+     * <c/> elements kept PHP busy for minutes.
      */
     public static int $maxCellElements = self::DEFAULT_MAX_CELL_ELEMENTS;
 
-    public const DEFAULT_MAX_NODES = 32000000;
+    public const DEFAULT_MAX_NODES = 48000000;
 
     /**
      * XML nodes of every type (elements, end tags, text, whitespace, comments, processing
-     * instructions) one reader may step over in all its passes together. A 50,000-row
-     * sheet of 80 inline-text columns is about 28 million.
+     * instructions) one reader may step over in all its passes together, however many values
+     * they give (see Budget). A 50,000-row sheet of 80 inline-text columns is about 28 million.
      */
     public static int $maxNodes = self::DEFAULT_MAX_NODES;
+
+    public const DEFAULT_MAX_SECONDS = 10.0;
+
+    /**
+     * The time one reader (one request) may run without values to show for it; every value
+     * read adds $maxSecondsPerValue (a real sheet needs about a quarter of that). The backstop
+     * for any work a node count cannot weigh. Checked about every 10 ms.
+     */
+    public static float $maxSeconds = self::DEFAULT_MAX_SECONDS;
+
+    public const DEFAULT_MAX_SECONDS_PER_VALUE = 0.000008;
+
+    public static float $maxSecondsPerValue = self::DEFAULT_MAX_SECONDS_PER_VALUE;
 
     public const DEFAULT_MAX_MARKUP_NODES = 10000;
 
@@ -201,24 +216,31 @@ final class SpreadsheetReader
      */
     public const LONG_RUN_WINDOW = 512 * 1024;
 
-    /** @var array<string, list<string>> per checked archive: parts with a stretch too long for XML */
-    private static array $longRuns = [];
+    /** What the archive check notes about a checked archive, kept in a marker under this name. */
+    private const MARKER = 'safe-r8';
 
     /**
-     * Refuses to read a part as XML when the archive check found a stretch in it too long
-     * for any real token. Binary parts (images) may have such stretches; they are refused
-     * only when something points the reader at them.
+     * @var array<string, array<string, string>> per checked archive: part => why it may not
+     *                                           be read as XML ("too_complex" or "unreadable")
+     */
+    private static array $refusedParts = [];
+
+    /**
+     * Refuses to read a part as XML when the archive check found it unfit: a stretch too long
+     * for any real token, an encoding other than UTF-8 (UTF-16 or UTF-32, NUL bytes, another
+     * encoding declared) or a document type declaration. Binary parts (images) may look like
+     * that; they are refused only when something points the reader at them.
      */
     public static function assertXmlPart(string $path, string $entry): void
     {
         $key = self::archiveKey($path);
 
-        if (! isset(self::$longRuns[$key])) {
-            $marker = self::cachePath($path, 'safe-r7');
+        if (! isset(self::$refusedParts[$key])) {
+            $marker = self::cachePath($path, self::MARKER);
             $listed = $marker !== null && is_file($marker) ? json_decode((string) file_get_contents($marker), true) : null;
 
             if (is_array($listed)) {
-                self::$longRuns[$key] = array_values(array_filter($listed, 'is_string'));
+                self::$refusedParts[$key] = self::refusedFrom($listed);
             } else {
                 $zip = new ZipArchive;
 
@@ -234,9 +256,28 @@ final class SpreadsheetReader
             }
         }
 
-        if (in_array($entry, self::$longRuns[$key] ?? [], true)) {
-            throw UnreadableSpreadsheet::because('too_complex');
+        $reason = self::$refusedParts[$key][$entry] ?? null;
+
+        if ($reason !== null) {
+            throw UnreadableSpreadsheet::because($reason === 'unreadable' ? 'unreadable' : 'too_complex');
         }
+    }
+
+    /**
+     * @param  array<mixed>  $listed
+     * @return array<string, string>
+     */
+    private static function refusedFrom(array $listed): array
+    {
+        $refused = [];
+
+        foreach ($listed as $name => $reason) {
+            if (is_string($name) && is_string($reason)) {
+                $refused[$name] = $reason;
+            }
+        }
+
+        return $refused;
     }
 
     private static function archiveKey(string $path): string
@@ -263,13 +304,52 @@ final class SpreadsheetReader
         return false;
     }
 
+    /**
+     * Whether the first bytes of a part are those of a UTF-8 XML document: no UTF-16 or
+     * UTF-32 byte order mark, a "<" first (after a UTF-8 mark and whitespace; EBCDIC and
+     * byte orders without a mark fail here), and no XML declaration naming another encoding.
+     * Excel, LibreOffice and every library we know write OOXML and ODF parts in UTF-8; in
+     * any other encoding the byte checks here (comments, processing instructions, document
+     * types) would not see what libxml then parses.
+     */
+    private static function startsAsUtf8Xml(string $head): bool
+    {
+        if (str_starts_with($head, "\xEF\xBB\xBF")) {
+            $head = substr($head, 3);
+        }
+
+        $head = ltrim($head, " \t\r\n");
+
+        if ($head === '' || $head[0] !== '<') {
+            return false;
+        }
+
+        if (! str_starts_with($head, '<?xml')) {
+            return true;
+        }
+
+        $end = strpos($head, '?>');
+
+        if ($end === false || $end > 512) {
+            return false;
+        }
+
+        $declaration = substr($head, 0, $end);
+
+        if (! preg_match('/\sencoding\s*=\s*(["\'])([^"\']*)\1/', $declaration, $m)) {
+            return true;
+        }
+
+        return in_array(strtolower($m[2]), ['utf-8', 'utf8'], true);
+    }
+
     private static function assertSafeArchive(ZipArchive $zip, string $path): void
     {
         // An archive checked once is not unpacked again on every Livewire request.
-        $marker = self::cachePath($path, 'safe-r7');
+        $marker = self::cachePath($path, self::MARKER);
         $key = self::archiveKey($path);
 
-        if (isset(self::$longRuns[$key])) {
+        if (isset(self::$refusedParts[$key])) {
             return;
         }
 
@@ -277,13 +357,13 @@ final class SpreadsheetReader
             $listed = json_decode((string) file_get_contents($marker), true);
 
             if (is_array($listed)) {
-                self::$longRuns[$key] = array_values(array_filter($listed, 'is_string'));
+                self::$refusedParts[$key] = self::refusedFrom($listed);
 
                 return;
             }
         }
 
-        $longRuns = [];
+        $refused = [];
 
         $tooLarge = fn (): UnreadableSpreadsheet => UnreadableSpreadsheet::because('too_large', replace: ['size' => (int) round(self::$maxEntryBytes / 1024 / 1024)]);
 
@@ -320,6 +400,8 @@ final class SpreadsheetReader
             $carry = '';
             $run = 0;
             $long = false;
+            $unfit = false;
+            $first = true;
 
             try {
                 while (! feof($stream)) {
@@ -336,15 +418,28 @@ final class SpreadsheetReader
                         throw $tooLarge();
                     }
 
+                    // Not UTF-8 (a mark or declaration at the start, NUL bytes anywhere) or a
+                    // document type declaration anywhere: never handed to libxml. A DTD is
+                    // parsed before the first node, so no count while reading could stop it
+                    // (300,000 unused entities took a minute), and no workbook part has one.
+                    if (! $unfit && $chunk !== '') {
+                        $unfit = ($first && ! self::startsAsUtf8Xml($chunk))
+                            || str_contains($chunk, "\0")
+                            || str_contains($carry . $chunk, '<!DOCTYPE');
+                        $first = false;
+                    }
+
                     // Comments and processing instructions, counted before libxml sees a
                     // byte: its XMLReader parses a run of them ahead in one step and keeps
                     // them all (a 3 MB upload reached 6 GB), so no count while reading could
                     // stop it. XML declarations (<?xml ) are not counted; the last bytes of
-                    // a chunk are carried over, so a mark split between chunks is still seen.
+                    // a chunk are carried over, so a mark split between chunks is still seen
+                    // and one wholly inside the carried bytes is not counted twice.
                     $buffer = $carry . $chunk;
-                    $markup += substr_count($buffer, '<?') - substr_count($carry, '<?') - substr_count($buffer, '<?xml ')
+                    $markup += substr_count($buffer, '<?') - substr_count($carry, '<?')
+                        - (substr_count($buffer, '<?xml ') - substr_count($carry, '<?xml '))
                         + substr_count($buffer, '<!--') - substr_count($carry, '<!--');
-                    $carry = substr($buffer, -5);
+                    $carry = substr($buffer, -8);
 
                     if ($markup > self::$maxMarkupNodes) {
                         throw UnreadableSpreadsheet::because('too_complex');
@@ -370,15 +465,17 @@ final class SpreadsheetReader
                 fclose($stream);
             }
 
-            if ($long) {
-                $longRuns[] = $name;
+            if ($unfit) {
+                $refused[$name] = 'unreadable';
+            } elseif ($long) {
+                $refused[$name] = 'too_complex';
             }
         }
 
-        self::$longRuns[$key] = $longRuns;
+        self::$refusedParts[$key] = $refused;
 
         if ($marker !== null) {
-            @file_put_contents($marker, (string) json_encode($longRuns));
+            @file_put_contents($marker, (string) json_encode((object) $refused));
         }
     }
 
@@ -602,6 +699,8 @@ final class SpreadsheetReader
             maxRows: self::$maxRowElements,
             maxCells: self::$maxCellElements,
             rowLimit: $this->rowLimit ?? self::$maxRows,
+            seconds: self::$maxSeconds,
+            secondsPerValue: self::$maxSecondsPerValue,
         );
     }
 

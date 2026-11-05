@@ -396,7 +396,12 @@ final class OdsSheets
                 throw UnreadableSpreadsheet::because('too_large_sheet');
             }
 
-            $budget->cells();
+            // An empty cell element without a value type or formula (or an empty covered cell)
+            // has no value: it counts half a cell, and allows half the node it is, however many
+            // columns it repeats over.
+            $empty = $xml->isEmptyElement && ($xml->localName === 'covered-table-cell'
+                || ($xml->getAttributeNs('value-type', self::OFFICE) === null && $xml->getAttributeNs('formula', self::TABLE) === null));
+            $empty ? $budget->emptyCell() : $budget->cells();
             $repeat = max(1, (int) ($xml->getAttributeNs('number-columns-repeated', self::TABLE) ?: 1));
             $first = $column;
             $column = min($column + $repeat, XlsxSheets::MAX_COLUMNS + 1);
@@ -409,8 +414,7 @@ final class OdsSheets
                 continue;
             }
 
-            // An empty cell without a value type or formula has no value: stepped over.
-            if ($xml->isEmptyElement && $xml->getAttributeNs('value-type', self::OFFICE) === null && $xml->getAttributeNs('formula', self::TABLE) === null) {
+            if ($empty) {
                 $moved = $xml->read() && XmlStream::count($xml, $budget);
 
                 continue;

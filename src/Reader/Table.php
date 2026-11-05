@@ -45,10 +45,6 @@ final class Table
         $count = 0;
         $bytes = 0;
 
-        // What a stored row costs besides its values: every header name and some framing per
-        // column, the padding of a short row included.
-        $perRow = array_sum(array_map('strlen', $this->headers)) + 6 * $width;
-
         foreach (($this->cells)() as $number => $cells) {
             // Every row the file holds counts, also one whose values all lie outside the
             // header's columns: a sheet of millions of such rows is never read to the end.
@@ -66,16 +62,34 @@ final class Table
                 continue;
             }
 
-            // The stored-bytes budget of one import, counted before the row is handed on.
-            $bytes += $perRow + array_sum(array_map('strlen', $cells));
+            $row = array_combine($this->headers, $cells);
 
-            if ($this->maxBytes !== null && $bytes > $this->maxBytes) {
-                throw UnreadableSpreadsheet::because('too_much_data', replace: ['size' => (int) round($this->maxBytes / 1024 / 1024)]);
+            // The stored-bytes budget of one import, counted before the row is handed on, as
+            // the JSON a row is stored as (header names, quotes and escapes included: a cell
+            // of 100 slashes or quotes is more than 100 bytes stored). Plain CSV is never longer.
+            if ($this->maxBytes !== null) {
+                $bytes += strlen(self::json($row));
+
+                if ($bytes > $this->maxBytes) {
+                    throw UnreadableSpreadsheet::because('too_much_data', replace: ['size' => (int) round($this->maxBytes / 1024 / 1024)]);
+                }
             }
 
-            yield $number => array_combine($this->headers, $cells);
+            yield $number => $row;
         }
     }
+
+    /**
+     * A row as it is stored: the same JSON flags wherever rows are written or counted.
+     *
+     * @param  array<string, string>  $row
+     */
+    public static function json(array $row): string
+    {
+        return (string) json_encode($row, self::JSON_FLAGS);
+    }
+
+    public const JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE;
 
     /**
      * @return array<int, array<string, string>>

@@ -179,7 +179,7 @@ it('allows nodes in proportion to the values read', function () {
     $budget->value();
 
     expect($base)->toBe(4000000)
-        ->and($budget->allowance)->toBe(4000024);
+        ->and($budget->allowance)->toBe(4000000 + \PNScripts\SheafgateLite\Reader\Budget::NODES_PER_VALUE);
 });
 
 // 3. Fatal errors at memory_limit 128M (numFmt codes, rich text, shared strings, CSV lines).

@@ -72,7 +72,7 @@ If you have not used Filament's importer yet, follow Filament's [import action g
 - Laravel 12 or 13
 - Filament 5.8 or newer
 
-Tested with the full test suite (161 tests) on:
+Tested with the full test suite (189 tests) on:
 
 | PHP | Laravel | Filament | Livewire | OpenSpout |
 |---|---|---|---|---|
@@ -118,6 +118,8 @@ Further caps, so a 128 MB `memory_limit` is enough for any file that passes them
 
 Round 7 turned these caps into budgets on the work done. The header's real extent sets every row's width and may not pass 1,024 columns; rows that come from ODS repeat attributes or hold values past that are never taken for the header. Repeated ODS cells and rows count toward the cell and row budgets as often as they are expanded, an import may hand on at most 128 MB of data (header names and padding of every row included) and a row at most 4 MB. Cells are read node by node, never built as a DOM: every node (elements, end tags, text, whitespace, comments, processing instructions) counts toward one budget per request of 4 million nodes plus 24 for every value read, 32 million at most, a cell may have 4,096 nodes and a file 10,000 comments or processing instructions (counted before libxml parses anything, because libxml keeps them all in memory outside PHP's `memory_limit`), and no stretch of an XML part may run 512 KB without a tag (libxml needs about ten times a token's size to parse it). Cell text is gathered one text node at a time and refused past 131,068 bytes, number format codes longer than Excel's 255 characters are ignored and shared text is kept up to 32 MB. All 59 hostile files of review rounds 5 to 7 are refused or read within 5 s under a 128 MB `memory_limit`, with at most 73 MB resident memory (most about 40 MB); the round 6 file with a cell pointing at the last of 2 million shared strings is now refused by the node budget instead of read in 3.5 s, and the 40,000-row comparison with openpyxl still reads every row the same (0 differences) in about 3 s. The test suite itself runs at 128 MB.
 
+Round 8 closed what a byte count and a node count cannot see. Every part the reader opens must be UTF-8 XML: a UTF-16 or UTF-32 byte order mark, a NUL byte, a first character other than `<`, or an XML declaration naming another encoding refuses the part before libxml sees a byte (in UTF-16 the comment and processing-instruction count saw nothing, and a 9.4 MB upload reached 1.39 GB of memory). A document type declaration refuses any part (300,000 unused entity declarations cost about a minute of CPU before the first node; no workbook part has one). Nodes are now allowed at 12 per value read (was 24), 32 per shared string item read and one per two empty cell elements next to real values (at most twice what the values allow), 48 million at most; an empty cell element counts half toward the cell budget, which is now 6 million (the 50,000 × 80 design point with half again as headroom). One reader may run 10 seconds plus 8 µs for every value read, checked about every 10 ms: the backstop for any work a node count cannot weigh. The 128 MB import budget counts the JSON a row is stored as (header names, quotes and escapes included). Measured at a 128 MB `memory_limit`: the UTF-16 files of review round 8 (up to 10 million processing instructions) and every document type file (100,000 to 2 million declarations) are refused in 0.0 to 0.5 s at about 41 MB resident memory (before: up to 1.39 GB, or 36 to 75 s of CPU); junk next to every value is refused after 4.5 s (was 18 s); a 50,000 × 80 sheet is read in about 16 s, 50,000 rows with 98 styled empty cells each in 5 s and a sheet using shared strings past index 900,000 in 2 s (all three were refused before); a 3.8 KB ODS file that staged 205 MB of JSON now counts 107 MB. All 97 files of review rounds 5 to 8 and the builder's own probes are refused or read within 16 s (only real 50,000-row sheets take over 10 s; the slowest hostile file, 2 million junk shared strings, stops at the clock after 11.4 s), with at most 87 MB resident memory, and the 40,000-row comparison with openpyxl still reads every row the same (0 differences).
+
 Cached sheet lists, previews and archive checks live in `storage/framework/cache/sheafgate`: the entries of an upload are deleted once its rows are taken over by the import, and entries older than 6 hours are swept. Change the defaults in a service provider:
 
 ```php
@@ -158,7 +160,7 @@ Uploads on a cloud disk are copied to a temporary local file once per request an
 
 ```bash
 composer install
-composer test      # Pest, 161 tests
+composer test      # Pest, 189 tests
 composer analyse   # PHPStan (Larastan) at the max level
 tools/matrix.sh php8.2 "~5.8.0" "^12.0" f58-l12   # the suite on another PHP/Filament/Laravel pair
 ```
