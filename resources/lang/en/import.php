@@ -49,7 +49,9 @@ return [
         'too_many_columns' => 'The header row has more than :max columns. Remove the empty or extra columns, or split the sheet, and upload it again.',
         'too_much_data' => 'The sheet holds more than :size MB of data to import. Split it into smaller files.',
         'row_too_large' => 'A row holds more than :max MB of text. The file looks damaged; save it again from Excel or LibreOffice.',
-        'too_complex' => 'The file holds far more XML markup than its cells need (comments, processing instructions or nested elements). Save it again from Excel or LibreOffice and upload it again.',
+        'too_complex' => 'The file holds far more XML markup than its cells need (comments, processing instructions, nested elements or attributes). Save it again from Excel or LibreOffice and upload it again.',
+        'reader_failed' => 'The file could not be read: reading it needed more memory than this server allows for one upload. Split it into smaller files or save it again from Excel or LibreOffice.',
+        'reader_unavailable' => 'This server cannot read XLSX or ODS files safely: PHP may not start the separate reader process it needs (proc_open is disabled or no PHP command-line binary was found). Save the sheet as CSV and upload that, or ask the site administrator to enable it.',
         'failed_title' => 'The file could not be imported',
     ],
 

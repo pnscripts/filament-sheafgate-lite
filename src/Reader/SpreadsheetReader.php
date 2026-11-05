@@ -111,8 +111,52 @@ final class SpreadsheetReader
      */
     public static int $maxImportBytes = self::DEFAULT_MAX_IMPORT_BYTES;
 
+    public const DEFAULT_WORKER_SECONDS = 20.0;
+
+    /**
+     * The wall clock of the reader's child process (see ReaderProcess): how long this process
+     * waits for its answers, plus $maxSecondsPerValue for every value it hands back. Past it the
+     * child is killed and the file refused. It bounds what no budget inside the child can see:
+     * one libxml call (a start tag with 70,000 attributes) that runs for minutes.
+     */
+    public static float $workerSeconds = self::DEFAULT_WORKER_SECONDS;
+
+    public const DEFAULT_WORKER_MEMORY_MB = 128;
+
+    /** PHP's memory_limit in the child. */
+    public static int $workerMemoryMb = self::DEFAULT_WORKER_MEMORY_MB;
+
+    public const DEFAULT_WORKER_ADDRESS_SPACE_MB = 512;
+
+    /**
+     * The child's address space (RLIMIT_AS), which also bounds what libxml allocates outside
+     * PHP's memory_limit. PHP itself maps about 130 MB before it reads a byte.
+     */
+    public static int $workerAddressSpaceMb = self::DEFAULT_WORKER_ADDRESS_SPACE_MB;
+
+    /**
+     * The PHP command-line binary that runs the child (null: found automatically; set it
+     * where PHP runs under PHP-FPM and `php` is not next to it).
+     */
+    public static ?string $phpBinary = null;
+
+    /** Where the cache lives when set (the child is told the parent's folder). */
+    public static ?string $cacheFolder = null;
+
     /** The row limit of this reader (defaults to $maxRows). */
     public ?int $rowLimit = null;
+
+    /** The most a batch of rows from the child holds before it waits for the parent. */
+    private const WORKER_BATCH_BYTES = 1048576;
+
+    /** This reader runs inside the child process and reads XML itself. */
+    private bool $inWorker = false;
+
+    /** The child process that reads this workbook's XML (XLSX/ODS only). */
+    private ?ReaderProcess $process = null;
+
+    /** @var array<string, string> sheet => its workbook part, as the child named it */
+    private array $parts = [];
 
     /** What this reader has done so far, against its limits. */
     private ?Budget $budget = null;
@@ -149,7 +193,14 @@ final class SpreadsheetReader
             throw UnreadableSpreadsheet::because('unreadable');
         }
 
-        return new self($path, self::detectFormat($path, $fileName), $csvEncoding, $csvDelimiter);
+        $format = self::detectFormat($path, $fileName);
+
+        // XLSX and ODS are read only in a child process; a host without one reads CSV only.
+        if ($format !== 'csv' && ! ReaderProcess::available()) {
+            throw UnreadableSpreadsheet::because('reader_unavailable');
+        }
+
+        return new self($path, $format, $csvEncoding, $csvDelimiter);
     }
 
     public static function detectFormat(string $path, ?string $fileName = null): string
@@ -485,6 +536,10 @@ final class SpreadsheetReader
      */
     public static function cacheDirectory(): string
     {
+        if (self::$cacheFolder !== null && is_dir(self::$cacheFolder)) {
+            return self::$cacheFolder;
+        }
+
         $base = function_exists('storage_path') && function_exists('app') && app()->bound('path.storage')
             ? storage_path('framework/cache/sheafgate')
             : sys_get_temp_dir() . '/sheafgate-cache';
@@ -587,6 +642,14 @@ final class SpreadsheetReader
      */
     private function readSheetNames(): array
     {
+        $process = $this->process();
+
+        if ($process !== null) {
+            $names = $process->call(['op' => 'sheets']);
+
+            return is_array($names) ? array_values(array_map(fn (mixed $name): string => is_scalar($name) ? (string) $name : '', $names)) : [];
+        }
+
         if ($this->format === 'ods') {
             try {
                 $names = $this->withXmlErrors(fn (): array => (new OdsSheets($this->path, $this->budget()))->names());
@@ -639,7 +702,10 @@ final class SpreadsheetReader
             $found = $cache !== null && is_file($cache) ? (string) file_get_contents($cache) : null;
 
             if ($found === null) {
-                $found = (string) $this->withXmlErrors(fn (): ?string => (new OdsSheets($this->path, $this->budget()))->firstFilled(self::PREVIEW_BLANK_ROWS));
+                $process = $this->process();
+                $found = $process !== null
+                    ? self::text($process->call(['op' => 'first']))
+                    : (string) $this->withXmlErrors(fn (): ?string => (new OdsSheets($this->path, $this->budget()))->firstFilled(self::PREVIEW_BLANK_ROWS));
 
                 if ($cache !== null) {
                     @file_put_contents($cache, $found);
@@ -679,6 +745,12 @@ final class SpreadsheetReader
 
         if ($this->format === 'xlsx' && $sheet !== null) {
             try {
+                $process = $this->process();
+
+                if ($process !== null) {
+                    return 'part:' . ($this->parts[$sheet] ??= self::text($process->call(['op' => 'part', 'sheet' => $sheet])));
+                }
+
                 return 'part:' . $this->xlsx()->part($sheet);
             } catch (Throwable) {
                 // An unknown sheet is refused when it is read.
@@ -973,6 +1045,13 @@ final class SpreadsheetReader
         }
 
         $sheet = $this->resolveSheet($sheet);
+        $process = $this->process();
+
+        if ($process !== null) {
+            yield from $process->rows($sheet, $width, $only, $onFlag);
+
+            return;
+        }
 
         if ($this->format === 'ods') {
             yield from (new OdsSheets($this->path, $this->budget()))->rows((string) $sheet, $width, $only, $onFlag);
@@ -1049,6 +1128,20 @@ final class SpreadsheetReader
     private function headerMerges(?string $sheet, int $headerRow): array
     {
         try {
+            $process = $this->process();
+
+            if ($process !== null) {
+                $merges = [];
+
+                foreach ((array) $process->call(['op' => 'merges', 'sheet' => $sheet, 'row' => $headerRow]) as $pair) {
+                    if (is_array($pair) && is_int($pair[0] ?? null) && is_int($pair[1] ?? null)) {
+                        $merges[] = [$pair[0], $pair[1]];
+                    }
+                }
+
+                return $merges;
+            }
+
             return match ($this->format) {
                 'xlsx' => $this->xlsxMerges($sheet, $headerRow),
                 'ods' => (new OdsSheets($this->path, $this->budget()))->merges((string) $sheet, $headerRow),
@@ -1091,5 +1184,227 @@ final class SpreadsheetReader
     private function xlsx(): XlsxSheets
     {
         return $this->xlsxSheets ??= new XlsxSheets($this->path, $this->budget());
+    }
+
+    /**
+     * The child process that reads this workbook (started on first use, so the row limit set
+     * after open() applies); null for CSV and inside the child itself.
+     */
+    private function process(): ?ReaderProcess
+    {
+        if ($this->format === 'csv' || $this->inWorker) {
+            return null;
+        }
+
+        return $this->process ??= new ReaderProcess([
+            'path' => $this->path,
+            'format' => $this->format,
+            'row_limit' => $this->rowLimit,
+            'refused' => self::$refusedParts[self::archiveKey($this->path)] ?? null,
+            'cache' => self::cacheDirectory(),
+            'limits' => [
+                'maxRows' => self::$maxRows,
+                'maxEntryBytes' => self::$maxEntryBytes,
+                'maxRowElements' => self::$maxRowElements,
+                'maxCellElements' => self::$maxCellElements,
+                'maxNodes' => self::$maxNodes,
+                'maxSeconds' => self::$maxSeconds,
+                'maxSecondsPerValue' => self::$maxSecondsPerValue,
+                'maxMarkupNodes' => self::$maxMarkupNodes,
+                'maxImportBytes' => self::$maxImportBytes,
+                'workerSeconds' => self::$workerSeconds,
+                'workerAddressSpaceMb' => self::$workerAddressSpaceMb,
+            ],
+        ]);
+    }
+
+    /**
+     * The child process ended for this reader (it ends with the reader anyway): for tests.
+     */
+    public function workerPid(): ?int
+    {
+        return $this->process?->pid();
+    }
+
+    /**
+     * Ends the child process now instead of when the reader goes away.
+     */
+    public function close(): void
+    {
+        $this->process?->close();
+        $this->process = null;
+    }
+
+    /**
+     * @internal The child's side of ReaderProcess (reader-worker.php): one request per line
+     *           on $in, answers as JSON lines on $out, until $in ends.
+     *
+     * @param  resource  $in
+     * @param  resource  $out
+     */
+    public static function serve($in, $out): int
+    {
+        libxml_use_internal_errors(true);
+        $write = function (mixed $message) use ($out): int {
+            $line = json_encode($message, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
+            fwrite($out, $line);
+
+            return strlen($line);
+        };
+        $next = function () use ($in): ?array {
+            $line = fgets($in);
+
+            if ($line === false) {
+                return null;
+            }
+
+            $request = json_decode($line, true, 8);
+
+            return is_array($request) ? $request : [];
+        };
+
+        $write(['ready' => true]);
+        fflush($out);
+        $reader = null;
+
+        while (($request = $next()) !== null) {
+            $op = $request['op'] ?? null;
+
+            try {
+                if ($op === 'init') {
+                    $limits = self::initWorker($request);
+                    $reader = new self(self::text($request['path'] ?? null), self::text($request['format'] ?? null), null, null);
+                    $reader->inWorker = true;
+                    $reader->rowLimit = is_int($request['row_limit'] ?? null) ? $request['row_limit'] : null;
+                    $write(['ok' => true, 'limits' => $limits]);
+                } elseif ($reader === null) {
+                    $write(['error' => 'unreadable']);
+                } elseif ($op === 'sheets') {
+                    $write(['ok' => $reader->readSheetNames()]);
+                } elseif ($op === 'first') {
+                    $write(['ok' => $reader->withXmlErrors(fn (): ?string => (new OdsSheets($reader->path, $reader->budget()))->firstFilled(self::PREVIEW_BLANK_ROWS))]);
+                } elseif ($op === 'part') {
+                    $write(['ok' => $reader->withXmlErrors(fn (): string => $reader->xlsx()->part(self::text($request['sheet'] ?? null)))]);
+                } elseif ($op === 'merges') {
+                    $write(['ok' => $reader->headerMerges(self::nullableText($request['sheet'] ?? null), is_int($request['row'] ?? null) ? $request['row'] : 1)]);
+                } elseif ($op === 'rows') {
+                    $batch = max(1, is_int($request['batch'] ?? null) ? $request['batch'] : 1);
+                    $sent = 0;
+                    $bytes = 0;
+                    $rows = $reader->readCells(
+                        self::nullableText($request['sheet'] ?? null),
+                        is_int($request['width'] ?? null) ? $request['width'] : null,
+                        is_int($request['only'] ?? null) ? $request['only'] : null,
+                        function (): void {},
+                        function (int $number, string $flag) use ($write): void {
+                            $write(['flag' => [$number, $flag]]);
+                        },
+                    );
+
+                    foreach ($rows as $number => $cells) {
+                        $bytes += $write([$number, $cells]);
+
+                        // A batch ends after its rows or after 1 MB, so a reader that stops
+                        // early (a preview of 4 MB rows) never makes the child run far ahead.
+                        if (++$sent >= $batch || $bytes >= self::WORKER_BATCH_BYTES) {
+                            $write(['more' => true]);
+                            fflush($out);
+                            $more = $next();
+
+                            if ($more === null) {
+                                return 0;
+                            }
+
+                            if (($more['op'] ?? null) !== 'more') {
+                                break;
+                            }
+
+                            $batch = max(1, is_int($more['batch'] ?? null) ? $more['batch'] : 1);
+                            $sent = 0;
+                            $bytes = 0;
+                        }
+                    }
+
+                    // The sheet is closed (the generator's cleanup) before the answer.
+                    unset($rows);
+                    $write(['end' => true]);
+                } else {
+                    $write(['error' => 'unreadable']);
+                }
+            } catch (UnreadableSpreadsheet $exception) {
+                $write(['error' => $exception->reason, 'replace' => (object) $exception->replace]);
+            } catch (Throwable) {
+                // Broken XML, a damaged archive or a reader failure: a clear message, never an error page.
+                $write(['error' => 'unreadable']);
+            } finally {
+                libxml_clear_errors();
+            }
+
+            fflush($out);
+        }
+
+        return 0;
+    }
+
+    private static function text(mixed $value): string
+    {
+        return is_string($value) || is_int($value) ? (string) $value : '';
+    }
+
+    private static function nullableText(mixed $value): ?string
+    {
+        return is_string($value) ? $value : null;
+    }
+
+    /**
+     * Takes the parent's limits and caps this process (the child) before it reads a byte:
+     * its address space (RLIMIT_AS) and its CPU time (RLIMIT_CPU, a backstop should the parent
+     * be gone; the parent's wall clock normally ends it much sooner).
+     *
+     * @param  array<mixed>  $request
+     * @return array{address_space: bool, cpu: bool}
+     */
+    private static function initWorker(array $request): array
+    {
+        $limits = is_array($request['limits'] ?? null) ? $request['limits'] : [];
+        $int = fn (string $key, int $default): int => is_int($limits[$key] ?? null) ? $limits[$key] : $default;
+        $float = fn (string $key, float $default): float => is_int($limits[$key] ?? null) || is_float($limits[$key] ?? null) ? (float) $limits[$key] : $default;
+
+        self::$maxRows = $int('maxRows', self::$maxRows);
+        self::$maxEntryBytes = $int('maxEntryBytes', self::$maxEntryBytes);
+        self::$maxRowElements = $int('maxRowElements', self::$maxRowElements);
+        self::$maxCellElements = $int('maxCellElements', self::$maxCellElements);
+        self::$maxNodes = $int('maxNodes', self::$maxNodes);
+        self::$maxSeconds = $float('maxSeconds', self::$maxSeconds);
+        self::$maxSecondsPerValue = $float('maxSecondsPerValue', self::$maxSecondsPerValue);
+        self::$maxMarkupNodes = $int('maxMarkupNodes', self::$maxMarkupNodes);
+        self::$maxImportBytes = $int('maxImportBytes', self::$maxImportBytes);
+        self::$workerSeconds = $float('workerSeconds', self::$workerSeconds);
+        self::$workerAddressSpaceMb = $int('workerAddressSpaceMb', self::$workerAddressSpaceMb);
+
+        $cache = $request['cache'] ?? null;
+
+        if (is_string($cache) && is_dir($cache)) {
+            self::$cacheFolder = $cache;
+        }
+
+        $path = self::text($request['path'] ?? null);
+        $refused = $request['refused'] ?? null;
+
+        if (is_array($refused)) {
+            self::$refusedParts[self::archiveKey($path)] = self::refusedFrom($refused);
+        }
+
+        $addressSpace = false;
+        $cpu = false;
+
+        if (function_exists('posix_setrlimit') && defined('POSIX_RLIMIT_AS') && defined('POSIX_RLIMIT_CPU')) {
+            $bytes = max(64, self::$workerAddressSpaceMb) * 1024 * 1024;
+            $addressSpace = @posix_setrlimit(POSIX_RLIMIT_AS, $bytes, $bytes);
+            $seconds = (int) ceil(self::$workerSeconds + self::$maxSecondsPerValue * self::$maxCellElements) + 10;
+            $cpu = @posix_setrlimit(POSIX_RLIMIT_CPU, $seconds, $seconds + 5);
+        }
+
+        return ['address_space' => $addressSpace, 'cpu' => $cpu];
     }
 }

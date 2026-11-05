@@ -71,8 +71,9 @@ If you have not used Filament's importer yet, follow Filament's [import action g
 - PHP 8.2 or newer
 - Laravel 12 or 13
 - Filament 5.8 or newer
+- For XLSX and ODS: PHP may start a process (`proc_open` enabled) and a PHP command-line binary is available (found next to the running PHP; set `SHEAFGATE_PHP_BINARY` or `reader.php_binary` in `config/sheafgate-lite.php` under PHP-FPM if it is elsewhere). Without them XLSX and ODS uploads are refused with a clear message and CSV files still work. The `posix` extension (standard on Linux) lets the reader cap its own memory.
 
-Tested with the full test suite (189 tests) on:
+Tested with the full test suite (203 tests) on:
 
 | PHP | Laravel | Filament | Livewire | OpenSpout |
 |---|---|---|---|---|
@@ -120,6 +121,8 @@ Round 7 turned these caps into budgets on the work done. The header's real exten
 
 Round 8 closed what a byte count and a node count cannot see. Every part the reader opens must be UTF-8 XML: a UTF-16 or UTF-32 byte order mark, a NUL byte, a first character other than `<`, or an XML declaration naming another encoding refuses the part before libxml sees a byte (in UTF-16 the comment and processing-instruction count saw nothing, and a 9.4 MB upload reached 1.39 GB of memory). A document type declaration refuses any part (300,000 unused entity declarations cost about a minute of CPU before the first node; no workbook part has one). Nodes are now allowed at 12 per value read (was 24), 32 per shared string item read and one per two empty cell elements next to real values (at most twice what the values allow), 48 million at most; an empty cell element counts half toward the cell budget, which is now 6 million (the 50,000 × 80 design point with half again as headroom). One reader may run 10 seconds plus 8 µs for every value read, checked about every 10 ms: the backstop for any work a node count cannot weigh. The 128 MB import budget counts the JSON a row is stored as (header names, quotes and escapes included). Measured at a 128 MB `memory_limit`: the UTF-16 files of review round 8 (up to 10 million processing instructions) and every document type file (100,000 to 2 million declarations) are refused in 0.0 to 0.5 s at about 41 MB resident memory (before: up to 1.39 GB, or 36 to 75 s of CPU); junk next to every value is refused after 4.5 s (was 18 s); a 50,000 × 80 sheet is read in about 16 s, 50,000 rows with 98 styled empty cells each in 5 s and a sheet using shared strings past index 900,000 in 2 s (all three were refused before); a 3.8 KB ODS file that staged 205 MB of JSON now counts 107 MB. All 97 files of review rounds 5 to 8 and the builder's own probes are refused or read within 16 s (only real 50,000-row sheets take over 10 s; the slowest hostile file, 2 million junk shared strings, stops at the clock after 11.4 s), with at most 87 MB resident memory, and the 40,000-row comparison with openpyxl still reads every row the same (0 differences).
 
+After review round 9, XLSX and ODS files are never parsed in the web request or the queue worker. The request starts a separate PHP process for the reader (`proc_open`, the package's own `src/Reader/reader-worker.php`, which loads only the reader classes) and reads the rows back from it as JSON lines, in batches it asks for. The process limits itself before it reads a byte: PHP `memory_limit` 128 MB, address space 512 MB (`RLIMIT_AS`, which also bounds libxml's memory outside PHP's limit) and CPU time (`RLIMIT_CPU`, in case the request is gone). The request waits for it at most 20 seconds plus 8 µs for every value it hands back and then kills it (`SIGKILL`, reaped at once, no zombie): this bounds every cost libxml can hide inside one call, such as a start tag with 70,000 attributes (one node; libxml 2.9 checks attributes for duplicates pairwise, about 35 s for that one tag). One process serves one upload request and keeps the reader's budgets across all its passes; it ends with the request. Settings (`config/sheafgate-lite.php`, key `reader`): `timeout` (20), `memory_mb` (128), `address_space_mb` (512), `php_binary`. Where PHP may not start processes, XLSX and ODS uploads are refused with a clear message and CSV files still work. Measured at a 128 MB `memory_limit` on the 141 files of review rounds 5 to 9 and the builder's probes (both editions, identical outcomes): every file ends with exit 0 and no reader process left behind; the nine attribute-flood files of round 9 (one start tag with 70,000 attributes, in a cell, the workbook, shared strings, styles, a skipped element or ODS content; 198 KB to 3.9 MB) are refused after 20.1 to 20.3 s (before: accepted after 52 s, or still running after 5 to 17 minutes); a legitimate 50,000 × 80 sheet is read in about 17 s, as before; the largest resident memory of any run is 98 MB; the 40,000-row comparison with openpyxl reads every row the same (0 differences).
+
 Cached sheet lists, previews and archive checks live in `storage/framework/cache/sheafgate`: the entries of an upload are deleted once its rows are taken over by the import, and entries older than 6 hours are swept. Change the defaults in a service provider:
 
 ```php
@@ -160,7 +163,7 @@ Uploads on a cloud disk are copied to a temporary local file once per request an
 
 ```bash
 composer install
-composer test      # Pest, 189 tests
+composer test      # Pest, 203 tests
 composer analyse   # PHPStan (Larastan) at the max level
 tools/matrix.sh php8.2 "~5.8.0" "^12.0" f58-l12   # the suite on another PHP/Filament/Laravel pair
 ```
