@@ -2,7 +2,7 @@
 
 **Messy spreadsheets into Filament 5's own importer.** A drop-in replacement for Filament's `ImportAction` that reads XLSX, ODS and CSV files the way they arrive from suppliers and old systems: CSV in any common encoding and delimiter, a title or notes above the header row, merged and blank header cells, several sheets. Filament's column mapping, validation, queued chunks, notifications and failed-rows download work exactly as before. Filament 5 only.
 
-![The import modal with a workbook: sheet “Spring update”, header in row 3, each column mapped with an example value](docs/images/modal.jpg)
+![The import modal with a workbook: sheet “Spring update”, header in row 3, each column mapped with an example value](https://raw.githubusercontent.com/pnscripts/filament-sheafgate-lite/main/docs/images/modal.jpg)
 
 What it adds to Filament's CSV-only import:
 
@@ -51,7 +51,7 @@ If you have not used Filament's importer yet, follow Filament's [import action g
 
 | | |
 |---|---|
-| ![A Windows-1252 CSV separated by semicolons: the modal says how it was read and shows “Crème Linen Apron”](docs/images/csv.jpg) | ![After the import: Filament's notification with the count and the failed-rows download](docs/images/result.jpg) |
+| ![A Windows-1252 CSV separated by semicolons: the modal says how it was read and shows “Crème Linen Apron”](https://raw.githubusercontent.com/pnscripts/filament-sheafgate-lite/main/docs/images/csv.jpg) | ![After the import: Filament's notification with the count and the failed-rows download](https://raw.githubusercontent.com/pnscripts/filament-sheafgate-lite/main/docs/images/result.jpg) |
 | CSV in UTF-8, UTF-16, Windows-1251 or Windows-1252, with commas, semicolons, tabs or vertical bars: detected and shown. | Filament's own import runs: chunks, notifications and the failed-rows file. Values are imported as Filament reads them: the “12,50” of the demo file became 1,250.00 (see Not included). |
 
 - **Workbooks:** `.xlsx` (Excel, LibreOffice, Google Sheets exports) and `.ods`. When a workbook has several sheets, a **Sheet** field appears; the first sheet with data is chosen.
@@ -64,7 +64,7 @@ If you have not used Filament's importer yet, follow Filament's [import action g
 - **Everything else is Filament's:** `maxRows()`, `chunkSize()`, `options()`, `job()`, the example CSV, `authorize()`, the completion notification and the failed-rows download behave as documented by Filament.
 - **English and Bulgarian** included.
 
-![The same modal in dark mode](docs/images/dark.jpg)
+![The same modal in dark mode](https://raw.githubusercontent.com/pnscripts/filament-sheafgate-lite/main/docs/images/dark.jpg)
 
 ## Requirements
 

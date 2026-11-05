@@ -1,6 +1,6 @@
 # Sheafgate Lite: directory listings
 
-Status 2026-11-03: built and tested (203 Pest tests at memory_limit 128M after the review round 9 rework with the reader in a child process, PHPStan max), buyer check from the release archive passed (see the build notes for versions). Not submitted anywhere. Planned public repository https://github.com/pnscripts/filament-sheafgate-lite with tag v1.0.0; the coordinator creates it.
+Status 2026-11-05: acceptance check SHIP (option B, 203 Pest tests at memory_limit 128M, PHPStan max, buyer check from the release zip passed). Repository https://github.com/pnscripts/filament-sheafgate-lite made public with tag v1.0.0 and a GitHub release; Packagist and the Filament plugin directory follow (requirements re-read 2026-11-05: Packagist needs a public HTTPS repository, composer.json at the root, versions from tags, `composer validate`; the Filament author portal signs in with GitHub OAuth, scopes user:email and read:org).
 
 ## Packagist (owner step: sign-in)
 

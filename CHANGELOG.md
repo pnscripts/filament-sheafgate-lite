@@ -2,7 +2,7 @@
 
 All notable changes to Sheafgate Lite are listed here. The project follows [Semantic Versioning](https://semver.org/).
 
-## 1.0.0 - 2026-11-03
+## 1.0.0 - 2026-11-05
 
 First release.
 
