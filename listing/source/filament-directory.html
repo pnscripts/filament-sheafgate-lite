@@ -1,0 +1,40 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+@font-face{font-family:Onest;src:url(onest-latin.woff2) format('woff2');font-weight:100 900;unicode-range:U+0000-00FF,U+2000-206F}
+@font-face{font-family:Onest;src:url(onest-latin-ext.woff2) format('woff2');font-weight:100 900;unicode-range:U+0100-024F}
+*{margin:0;box-sizing:border-box}
+html,body{width:2560px;height:1440px;overflow:hidden}
+body{font-family:Onest,system-ui,sans-serif;color:#fff;position:relative;
+ background:radial-gradient(120% 140% at 0% 0%,#0d3a8a 0%,#071a3d 45%,#050d20 100%)}
+.left{position:absolute;left:150px;top:0;bottom:0;width:1120px;display:flex;flex-direction:column;justify-content:center}
+.logo{height:52px;width:auto;opacity:.9;margin-bottom:70px;align-self:flex-start}
+.kicker{display:inline-block;align-self:flex-start;background:#10b981;color:#fff;font-weight:700;font-size:38px;padding:12px 30px;border-radius:99px;margin-bottom:40px;letter-spacing:.02em}
+h1{font-weight:800;font-size:178px;line-height:.98;letter-spacing:-.025em}
+.tag{margin-top:46px;font-size:62px;line-height:1.2;font-weight:600;color:#dbe7ff}
+.tag b{color:#fff;font-weight:800}
+ul{list-style:none;margin-top:60px;display:flex;flex-direction:column;gap:22px;font-size:42px;color:#b7c9ee;font-weight:500}
+li::before{content:"";display:inline-block;width:18px;height:18px;border-radius:50%;background:#10b981;margin-right:24px;vertical-align:middle;position:relative;top:-4px}
+.right{position:absolute;left:1350px;top:0;width:1120px;height:1440px}
+.card{position:absolute;border-radius:28px;overflow:hidden;background:#fff;box-shadow:0 50px 120px rgba(0,0,0,.6),0 0 0 2px rgba(255,255,255,.12)}
+.modal{left:60px;top:110px;width:1000px;height:1420px}
+.modal img{width:1000px;display:block;margin-top:-6px}
+.modal::after{content:"";position:absolute;left:0;right:0;bottom:0;height:260px;background:linear-gradient(rgba(5,13,32,0),rgba(5,13,32,.0) 20%,#071a3d)}
+.csv{left:-190px;top:1215px;width:1000px;padding:0;border:4px solid #10b981}
+.csv img{width:1000px;display:block}
+.lbl{position:absolute;font-weight:700;font-size:34px;color:#fff;background:#0948b3;padding:10px 24px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.4)}
+</style></head><body>
+<div class="left">
+ <img class="logo" src="logo.svg" alt="">
+ <span class="kicker">Free · Filament 5 plugin</span>
+ <h1>Sheafgate Lite</h1>
+ <p class="tag"><b>XLSX, ODS and messy CSV</b> straight into Filament's own importer</p>
+ <ul>
+  <li>Header row found below titles and notes</li>
+  <li>CSV encoding and delimiter detected</li>
+  <li>Sheet choice, example values in the mapping</li>
+ </ul>
+</div>
+<div class="right">
+ <div class="card modal"><img src="modal.png" alt=""></div>
+ <div class="card csv"><img src="csv.png" alt=""></div>
+</div>
+</body></html>

@@ -29,9 +29,13 @@ The directory is managed on filamentphp.com: sign in with GitHub at https://fila
 | Categories / tags | Action, Tables |
 | Dark mode | Yes (only Filament components; screenshot docs/images/dark.jpg) |
 | Translations | Yes (English and Bulgarian, publishable) |
-| Image (16:9, 2560x1440, light theme, plugin running) | listing/filament-directory.jpg (a Windows-1252 CSV read in Lite's modal) |
+| Image (16:9, 2560x1440 JPG, 272 KB) | listing/filament-directory.jpg (06.11 after the reviewer's note: close-up of Lite's import modal, no sidebar or top bar, with the name and tagline; the full-panel image of 03.11 is kept as listing/filament-directory.old.jpg) |
 
 Each ticked box is a public claim: dark mode and translations are verified; do not tick anything else.
+
+## Directory image (reviewer note 06.11)
+
+Filament's reviewer asked for an image that highlights the plugin rather than a full panel: zoom in or crop out the sidebar and top bar, and add the plugin name and a short tagline. The new image is built from the real 2560x1440 captures in `build/shots-hires/` (modal.png: the XLSX sheet, header row 3 and the mapping with example values; csv.png: the Windows-1252 detection line), cropped to the modal only, on the PN Scripts dark-blue brand background with Onest type. Source: `listing/source/filament-directory.html` (render headless, muted Chrome at 2560x1440 with the crops `modal.png` = modal.png (820,26)-(1740,1440) and `csv.png` = csv.png (840,180)-(1720,340) and the Onest fonts and white logo from marketing/social-kit/source next to it). Tagline: "XLSX, ODS and messy CSV straight into Filament's own importer". Lite has no review/preview table (that is Pro), so none is shown. The directory's image size rules are behind the author sign-in and were not readable on 06.11; the image follows 16:9, 2560x1440, JPG under 1 MB.
 
 ## Positioning
 
