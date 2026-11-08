@@ -41,7 +41,7 @@ Other packages also read XLSX into Filament's importer; Sheafgate Lite is the on
 Installing from the release archive instead of Packagist: unzip it to `packages/filament-sheafgate-lite`, then
 
 ```bash
-composer config repositories.sheafgate-lite '{"type": "path", "url": "packages/filament-sheafgate-lite", "options": {"versions": {"pnscripts/sheafgate-lite": "1.0.0"}}}'
+composer config repositories.sheafgate-lite '{"type": "path", "url": "packages/filament-sheafgate-lite", "options": {"versions": {"pnscripts/sheafgate-lite": "1.0.1"}}}'
 composer require pnscripts/sheafgate-lite:^1.0
 ```
 

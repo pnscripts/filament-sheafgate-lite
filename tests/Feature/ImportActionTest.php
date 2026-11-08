@@ -241,6 +241,26 @@ it('uses the CSV encoding and delimiter you set', function () {
     expect(Product::query()->sole()->name)->toBe('Größe, groß');
 });
 
+it('hands an encoding closure the open CSV stream on Filament 5.11, and works without it', function () {
+    // Filament 5.11 calls getCsvEncoding($resource). An override without that parameter
+    // was a fatal error the moment the class loaded, so this test is the guard.
+    $seen = 'never called';
+    $action = ImportAction::make('import')->csvEncoding(function ($resource) use (&$seen) {
+        $seen = $resource;
+
+        return 'ISO-8859-1';
+    });
+
+    $stream = fopen('php://memory', 'r');
+
+    expect($action->getCsvEncoding($stream))->toBe('ISO-8859-1')
+        ->and($seen)->toBe($stream)
+        ->and($action->getCsvEncoding())->toBe('ISO-8859-1')
+        ->and($seen)->toBeNull();
+
+    fclose($stream);
+});
+
 it('rejects files it cannot read, with a clear reason', function (string $name, string $bytes, string $message) {
     livewire(ListProducts::class)
         ->mountAction('import')
