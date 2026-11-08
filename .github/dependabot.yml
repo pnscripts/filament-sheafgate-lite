@@ -1,0 +1,38 @@
+# A library commits no composer.lock, so CI resolves and audits the newest
+# versions on every run (and weekly). Dependabot watches the constraints in
+# composer.json and the actions: minor and patch updates once a week in one
+# pull request per ecosystem, security updates as soon as they are published.
+version: 2
+updates:
+  - package-ecosystem: composer
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Europe/Sofia
+    open-pull-requests-limit: 5
+    versioning-strategy: widen
+    groups:
+      composer:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      composer-security:
+        applies-to: security-updates
+        patterns: ['*']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Europe/Sofia
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      actions-security:
+        applies-to: security-updates
+        patterns: ['*']

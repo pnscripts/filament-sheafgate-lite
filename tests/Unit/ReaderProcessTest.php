@@ -14,7 +14,21 @@ afterEach(function () {
     SpreadsheetReader::$phpBinary = null;
     SpreadsheetReader::$maxSeconds = SpreadsheetReader::DEFAULT_MAX_SECONDS;
     SpreadsheetReader::$maxSecondsPerValue = SpreadsheetReader::DEFAULT_MAX_SECONDS_PER_VALUE;
+    putenv('SHEAFGATE_TEST_PHP');
+    putenv('SHEAFGATE_TEST_LINE_DELAY');
 });
+
+/**
+ * Runs the reader child through tests/Fixtures/bin/slow-php, which holds back every line the
+ * child writes by $seconds: a child slower than its wall clock on every machine, whatever
+ * the speed of the runner or of its libxml.
+ */
+function slowChild(float $seconds): void
+{
+    putenv('SHEAFGATE_TEST_PHP=' . PHP_BINARY);
+    putenv('SHEAFGATE_TEST_LINE_DELAY=' . sprintf('%.3F', $seconds));
+    SpreadsheetReader::$phpBinary = dirname(__DIR__) . '/Fixtures/bin/slow-php';
+}
 
 /**
  * Whether a process is gone: not running and not left as a zombie (no /proc entry at all).
@@ -112,27 +126,47 @@ it('limits the child to its memory before it reads the file', function () {
         ->and((int) $c[1])->toBeLessThan(120);
 })->skip(! function_exists('posix_setrlimit') || ! is_dir('/proc/self'), 'needs posix_setrlimit and /proc');
 
-it('kills the child past the wall clock when one start tag carries a flood of attributes', function (string $where) {
+it('never lets one start tag with a flood of attributes hold the request', function (string $where) {
     SpreadsheetReader::$workerSeconds = 1.0;
     $path = attributeFlood(50000, $where);
     $started = microtime(true);
-    $pid = null;
 
+    // A libxml that checks attributes pairwise needs about 12 s for this tag, and the child
+    // is stopped at its wall clock; a libxml that hashes them reads it at once. Either way
+    // the request ends quickly, with the rows or with the clear "too complex" refusal.
     try {
-        $reader = SpreadsheetReader::open($path, 'flood.xlsx');
-        readAll($reader);
-        $this->fail('The flood was read.');
+        expect(readAll(SpreadsheetReader::open($path, 'flood.xlsx')))->toBe(1);
     } catch (UnreadableSpreadsheet $exception) {
         expect($exception->reason)->toBe('too_complex');
     }
 
-    // libxml alone needs about 12 s for this tag; the child is stopped after the wall clock.
     expect(microtime(true) - $started)->toBeLessThan(6.0);
 })->with(['cell', 'workbook']);
 
+it('kills the child past its wall clock and says the file is too complex', function () {
+    SpreadsheetReader::$workerSeconds = 1.0;
+    SpreadsheetReader::$maxSecondsPerValue = 0.0;
+    slowChild(0.4);
+    $started = microtime(true);
+
+    try {
+        readAll(SpreadsheetReader::open(freshCopy('catalogue-libreoffice.xlsx'), 'c.xlsx'));
+        $this->fail('The child answered within its wall clock.');
+    } catch (UnreadableSpreadsheet $exception) {
+        expect($exception->reason)->toBe('too_complex');
+    }
+
+    // Stopped at the clock, not after the whole sheet was held back line by line.
+    expect(microtime(true) - $started)->toBeLessThan(4.0);
+});
+
 it('keeps a killed child dead: every later look at the file gives the same clear error, and no zombie is left', function () {
-    SpreadsheetReader::$workerSeconds = 0.5;
-    $reader = SpreadsheetReader::open(attributeFlood(50000), 'flood.xlsx');
+    // Each answer is held back 0.3 s: start and sheet names fit in the 1 s clock, the
+    // preview does not.
+    SpreadsheetReader::$workerSeconds = 1.0;
+    SpreadsheetReader::$maxSecondsPerValue = 0.0;
+    slowChild(0.3);
+    $reader = SpreadsheetReader::open(freshCopy('catalogue-libreoffice.xlsx'), 'c.xlsx');
     $reader->sheets();
     $pid = (int) $reader->workerPid();
 
@@ -144,27 +178,29 @@ it('keeps a killed child dead: every later look at the file gives the same clear
 it('gives the wall clock more time for every value the child hands back', function () {
     $rows = '<row r="1"><c r="A1" t="inlineStr"><is><t>sku</t></is></c><c r="B1" t="inlineStr"><is><t>name</t></is></c></row>';
 
-    for ($r = 2; $r <= 30001; $r++) {
+    for ($r = 2; $r <= 2001; $r++) {
         $rows .= "<row r=\"{$r}\"><c r=\"A{$r}\"><v>{$r}</v></c><c r=\"B{$r}\" t=\"inlineStr\"><is><t>item {$r}</t></is></c></row>";
     }
 
     $path = zipWith(xlsxWithSheet($rows));
 
-    // A base clock of 0.25 s is enough to start and preview, not to read 60,000 values:
-    // without time per value the child is stopped; with 0.1 ms per value the sheet is read.
-    SpreadsheetReader::$workerSeconds = 0.25;
+    // Every row is held back at least 1 ms, so 2,000 rows take 2 s or more on any machine.
+    // A base clock of 0.5 s cannot hold that: without time per value the child is stopped.
+    // With 5 ms per value (10 ms a row, several times what a row takes) the sheet is read.
+    SpreadsheetReader::$workerSeconds = 0.5;
     SpreadsheetReader::$maxSecondsPerValue = 0.0;
+    slowChild(0.001);
 
     try {
         readAll(SpreadsheetReader::open($path, 'v.xlsx'));
-        $this->fail('60,000 values were read within 0.25 s.');
+        $this->fail('2,000 rows were read within 0.5 s.');
     } catch (UnreadableSpreadsheet $exception) {
         expect($exception->reason)->toBe('too_complex');
     }
 
-    SpreadsheetReader::$maxSecondsPerValue = 0.0001;
+    SpreadsheetReader::$maxSecondsPerValue = 0.005;
 
-    expect(readAll(SpreadsheetReader::open($path, 'v.xlsx')))->toBe(30000);
+    expect(readAll(SpreadsheetReader::open($path, 'v.xlsx')))->toBe(2000);
 });
 
 it('ends with a clear error when the child runs out of memory', function () {

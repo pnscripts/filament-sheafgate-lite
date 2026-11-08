@@ -2,6 +2,11 @@
 
 All notable changes to Sheafgate Lite are listed here. The project follows [Semantic Versioning](https://semver.org/).
 
+## 1.0.1 - 2026-11-08
+
+- Works with Filament 5.11: Filament now passes the open CSV file to `getCsvEncoding()`, and the old override without that parameter stopped PHP with a fatal error as soon as the class loaded. A `csvEncoding()` closure can now take the file as `$resource`.
+- Checked on every push and weekly against the newest Filament and Laravel releases, on PHP 8.2 and 8.4, with `composer audit`.
+
 ## 1.0.0 - 2026-11-05
 
 First release.

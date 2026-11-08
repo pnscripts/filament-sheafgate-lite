@@ -1,0 +1,48 @@
+name: CI
+
+# Every push to main and every pull request. A library commits no
+# composer.lock, so each run resolves the newest versions the constraints
+# allow: what a new install gets. That is how a Filament release that changes
+# a method this package overrides is caught here, not by the people using it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so a new Filament or Laravel release is tried even when nothing
+    # here changed.
+    - cron: '0 5 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 8.2 resolves Laravel 12, 8.4 Laravel 13.
+        php: ['8.2', '8.4']
+    steps:
+      # Actions are pinned to commit hashes, so a moved tag cannot change what runs here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: zip, intl, pdo_sqlite
+          coverage: none
+          tools: composer:v2
+      - name: Install dependencies
+        run: composer update --no-interaction --no-progress --prefer-dist
+      - name: Composer audit
+        run: composer audit
+      - name: Static analysis
+        run: composer analyse
+      - name: Tests
+        run: composer test

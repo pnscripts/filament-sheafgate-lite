@@ -91,9 +91,17 @@ class ImportAction extends FilamentImportAction
         return $this;
     }
 
-    public function getCsvEncoding(): ?string
+    /**
+     * Filament 5.11 passes the open CSV stream, so a closure can look at the file; older
+     * releases call this without it.
+     *
+     * @param  resource | null  $resource
+     */
+    public function getCsvEncoding(mixed $resource = null): ?string
     {
-        return $this->toText($this->evaluate($this->csvEncoding));
+        return $this->toText($this->evaluate($this->csvEncoding, [
+            'resource' => $resource,
+        ]));
     }
 
     /**
