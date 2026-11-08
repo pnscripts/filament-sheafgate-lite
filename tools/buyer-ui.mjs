@@ -30,6 +30,18 @@ const openModal = async () => {
   return modal;
 };
 
+// Filament's file field loads FilePond lazily (x-load) and creates it only after a round trip
+// for the already uploaded files. Until then the modal holds a bare <input type=file> that
+// FilePond replaces; a file handed to that bare input is dropped (no upload request, no
+// preview). A person's first click lands on FilePond, which is ready a moment after the modal
+// opens; a script is faster, so it hands the file to FilePond's own input, which exists only
+// once the field is ready. Seen with Filament 5.10.3 and 5.11.2 alike (4 of 38 looped runs).
+const upload = async (modal, file) => {
+  const input = modal.locator('input.filepond--browser');
+  await input.waitFor({ state: 'attached', timeout: 20000 });
+  await input.setInputFiles(file);
+};
+
 await p.goto(`${base}/demo-login`, { waitUntil: 'networkidle' });
 await p.evaluate(() => localStorage.setItem('theme', 'light'));
 await p.reload({ waitUntil: 'networkidle' });
@@ -37,7 +49,7 @@ await p.reload({ waitUntil: 'networkidle' });
 // 1. Workbook: sheet, header row below a title, mapping with examples
 let modal = await openModal();
 check(await modal.getByText('Upload an XLSX, ODS or CSV file').first().waitFor({ timeout: 10000 }).then(() => true, () => false), 'upload field asks for XLSX, ODS or CSV');
-await modal.locator('input[type=file]').setInputFiles(process.env.DEMO_FILE);
+await upload(modal, process.env.DEMO_FILE);
 await modal.getByText('Sheet “Spring update”, column names in row 3.').waitFor({ timeout: 20000 });
 await settle(1500);
 const m = await text(modal);
@@ -63,7 +75,7 @@ await shot('result');
 // 2. Windows-1252 CSV with semicolons
 await p.goto(`${base}/admin/products`, { waitUntil: 'networkidle' });
 modal = await openModal();
-await modal.locator('input[type=file]').setInputFiles(process.env.DEMO_CSV);
+await upload(modal, process.env.DEMO_CSV);
 await modal.getByText(/Read as Windows-1252 text, columns separated by semicolons/).waitFor({ timeout: 20000 });
 await settle(1200);
 check(/Name \(e\.g\. Crème Linen Apron\)/.test(await text(modal)), 'accented text read correctly');
