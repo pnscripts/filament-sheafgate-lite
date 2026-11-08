@@ -29,8 +29,10 @@ echo "  $("$PHP_BIN" -r 'echo PHP_VERSION;') | laravel $("$PHP_BIN" artisan --ve
 step 3 "install the release archive (path repository standing in for Packagist), composer require"
 mkdir -p packages && cp -r "$D" packages/
 # The archive has no git metadata, so the path repository is told its version (Packagist reads it from the tag).
-"$PHP_BIN" "$COMPOSER" config repositories.sheafgate-lite '{"type": "path", "url": "packages/filament-sheafgate-lite", "options": {"versions": {"pnscripts/sheafgate-lite": "1.0.0"}}}'
+VERSION=$(basename "$ZIP" .zip); VERSION=${VERSION##*-}
+"$PHP_BIN" "$COMPOSER" config repositories.sheafgate-lite "{\"type\": \"path\", \"url\": \"packages/filament-sheafgate-lite\", \"options\": {\"versions\": {\"pnscripts/sheafgate-lite\": \"$VERSION\"}}}"
 "$PHP_BIN" "$COMPOSER" require -q --no-interaction "pnscripts/sheafgate-lite:^1.0"
+"$PHP_BIN" "$COMPOSER" show pnscripts/sheafgate-lite | grep -q "^versions : \* $VERSION$" && ok "installed as $VERSION" || fail "installed version"
 "$PHP_BIN" artisan package:discover | grep -q "pnscripts/sheafgate-lite" && ok "provider discovered" || fail "provider discovered"
 "$PHP_BIN" "$COMPOSER" audit --no-interaction >/dev/null 2>&1 && ok "composer audit: no advisories" || fail "composer audit"
 
