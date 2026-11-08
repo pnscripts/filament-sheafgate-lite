@@ -31,6 +31,17 @@ function slowChild(float $seconds): void
 }
 
 /**
+ * The seconds the parent has waited for the reader's child so far (the part of the wall
+ * clock already used), read from the reader's private process for tests that set the clock.
+ */
+function secondsWaited(SpreadsheetReader $reader): float
+{
+    $process = (fn () => $this->process)->call($reader);
+
+    return (fn () => $this->waited)->call($process);
+}
+
+/**
  * Whether a process is gone: not running and not left as a zombie (no /proc entry at all).
  */
 function processGone(int $pid): bool
@@ -161,14 +172,16 @@ it('kills the child past its wall clock and says the file is too complex', funct
 });
 
 it('keeps a killed child dead: every later look at the file gives the same clear error, and no zombie is left', function () {
-    // Each answer is held back 0.3 s: start and sheet names fit in the 1 s clock, the
-    // preview does not.
-    SpreadsheetReader::$workerSeconds = 1.0;
+    // Each answer is held back 0.3 s. Start and sheet names get a clock no machine runs
+    // past; then the clock is set to 0.1 s beyond what the parent has waited so far, so the
+    // preview's first answer (0.3 s at the least) comes too late however busy the machine.
+    SpreadsheetReader::$workerSeconds = 60.0;
     SpreadsheetReader::$maxSecondsPerValue = 0.0;
     slowChild(0.3);
     $reader = SpreadsheetReader::open(freshCopy('catalogue-libreoffice.xlsx'), 'c.xlsx');
     $reader->sheets();
     $pid = (int) $reader->workerPid();
+    SpreadsheetReader::$workerSeconds = secondsWaited($reader) + 0.1;
 
     expect(fn () => $reader->preview())->toThrow(UnreadableSpreadsheet::class)
         ->and(processGone($pid))->toBeTrue()
