@@ -24,6 +24,8 @@ jobs:
   tests:
     name: PHP ${{ matrix.php }}
     runs-on: ubuntu-latest
+    # A hung step (network, installer) stops here, not after GitHub's 6 hours.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +34,9 @@ jobs:
     steps:
       # Actions are pinned to commit hashes, so a moved tag cannot change what runs here.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes, so the token is not kept in .git/config.
+          persist-credentials: false
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: ${{ matrix.php }}
