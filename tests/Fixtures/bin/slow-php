@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# A PHP binary for the tests that answers slowly: it runs the real PHP and holds
+# back every line the reader child writes by SHEAFGATE_TEST_LINE_DELAY seconds,
+# so a test can make the child slower than its wall clock on any machine, fast
+# or slow, with any libxml.
+set -u
+"${SHEAFGATE_TEST_PHP:?}" "$@" | while IFS= read -r line; do
+    sleep "${SHEAFGATE_TEST_LINE_DELAY:-0}"
+    printf '%s\n' "$line"
+done
